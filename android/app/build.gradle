@@ -1,0 +1,64 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "com.example.api_selfxo_project"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.example.api_selfxo_project"
+
+        // Required by charset_converter (minSdk 21)
+        minSdk 21
+
+        // Google Play requirement
+        targetSdk 33
+
+        versionCode 3
+        versionName "1.0.2"
+
+        multiDexEnabled true
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+
+            // Debug signing for kiosk / internal builds
+            signingConfig signingConfigs.debug
+        }
+
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+flutter {
+    source "../.."
+}
+
+dependencies {
+    // Loads CSNPrinterSDK.jar & simple-xml-2.7.1.jar
+    implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
+
+    // Required for your Epson / CSN printer Java code
+    implementation "com.fasterxml.jackson.core:jackson-databind:2.12.3"
+}

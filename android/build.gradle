@@ -1,0 +1,36 @@
+import org.gradle.api.tasks.Delete
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// Correct build directory mapping (Flutter recommended).
+def newBuildDir = rootProject.layout.buildDirectory.dir("../../build").get()
+rootProject.layout.buildDirectory.value(newBuildDir)
+
+subprojects {
+    def subBuildDir = newBuildDir.dir(project.name)
+    project.layout.buildDirectory.value(subBuildDir)
+}
+
+// Ensure app module evaluation.
+subprojects {
+    evaluationDependsOn(":app")
+}
+
+// Suppress noisy Java warnings from plugin sources and align Java level.
+subprojects {
+    tasks.withType(JavaCompile).configureEach {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+        options.compilerArgs += ["-Xlint:none", "-Xlint:-options", "-Xlint:-deprecation"]
+    }
+}
+
+// Clean task.
+tasks.register("clean", Delete) {
+    delete(rootProject.layout.buildDirectory)
+}
