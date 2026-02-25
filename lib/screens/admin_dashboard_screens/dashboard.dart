@@ -2046,6 +2046,7 @@ class _DashboardTabState extends State<DashboardTab> {
     final orderDate = _extractOrderDate(res.data);
     final items = parsed.items;
     if (items.isEmpty) throw Exception("Order items not found");
+    final parcelTotal = _extractParcelTotal(res.data, items);
     final restaurantName = await _resolveRestaurantName();
     final address = info["address"] != null ? info["address"].toString() : null;
     final taxId = info["tax_id"]?.toString();
@@ -2060,7 +2061,57 @@ class _DashboardTabState extends State<DashboardTab> {
       paymentMode: parsed.paymentMode,
       taxAmount: parsed.taxAmount,
       discountAmount: parsed.discountAmount,
+      removeTaxLines: true,
+      parcelTotalOverride: parcelTotal,
     );
+  }
+
+  num _extractParcelTotal(
+    dynamic data,
+    List<Map<String, dynamic>> items,
+  ) {
+    num total = 0;
+    bool found = false;
+    for (final item in items) {
+      final qty = item["qty"] is num ? item["qty"] as num : 1;
+      final charge =
+          item["take_away_charge"] ??
+          item["takeaway_charge"] ??
+          item["parcel_charge"] ??
+          item["parcelCharge"] ??
+          item["parcel_amount"] ??
+          item["parcelAmount"];
+      final num c = charge is num ? charge : num.tryParse("$charge") ?? 0;
+      if (c > 0) {
+        total += c * qty;
+        found = true;
+      }
+    }
+    if (found) return total;
+
+    Map? order;
+    if (data is Map) {
+      final dynamic raw =
+          data["order"] ?? data["data"]?["order"] ?? data["data"] ?? data;
+      if (raw is Map) order = raw;
+    }
+    if (order == null) return 0;
+    const keys = [
+      "take_away_charge",
+      "takeaway_charge",
+      "parcel_charge",
+      "parcel_charges",
+      "parcel_amount",
+      "parcel_total",
+      "parcelTotal",
+      "take_away_charge_total",
+    ];
+    for (final key in keys) {
+      final v = order?[key];
+      final num value = v is num ? v : num.tryParse("$v") ?? 0;
+      if (value > 0) return value;
+    }
+    return 0;
   }
 
   String? _extractTxnId(dynamic value) {

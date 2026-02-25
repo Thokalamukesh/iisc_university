@@ -3,7 +3,9 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:api_selfxo_project/screens/splash_screen.dart';
+import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
+import 'package:api_selfxo_project/printer/register_kiosk.dart';
+import 'package:api_selfxo_project/screens/register_screen.dart';
 import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
@@ -12,6 +14,7 @@ import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/core/kiosk_power.dart';
 import 'package:api_selfxo_project/core/kiosk_watchdog.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey =
@@ -40,14 +43,30 @@ Future<void> main() async {
     PaintingBinding.instance.imageCache.maximumSizeBytes = 120 << 20; // 120MB
     PaintingBinding.instance.imageCache.maximumSize = 300;
     WakelockPlus.enable();
-    runApp(const MyApp());
+    final prefs = await SharedPreferences.getInstance();
+    final restaurantId = prefs.getString("restaurant_id");
+    final setupDone = prefs.getBool("kiosk_setup_done") ?? false;
+    if (restaurantId != null && restaurantId.trim().isNotEmpty) {
+      try {
+        await DeviceBootstrap.ensureDeviceReady();
+      } catch (_) {}
+    }
+
+    final Widget initialHome = (restaurantId == null ||
+            restaurantId.trim().isEmpty)
+        ? const UserIdScreen()
+        : (setupDone ? const WelcomeScreen() : const RegisterKioskScreen());
+
+    runApp(MyApp(initialHome: initialHome));
   }, (error, stack) {
     reportUiCrash(error, stack);
   });
 }
 
 class MyApp extends StatefulWidget {
-  const MyApp({super.key});
+  final Widget initialHome;
+
+  const MyApp({super.key, required this.initialHome});
 
   @override
   State<MyApp> createState() => _MyAppState();
@@ -188,7 +207,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           },
         );
       },
-      home: const SplashScreen(),
+      home: widget.initialHome,
     );
   }
 

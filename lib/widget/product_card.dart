@@ -22,8 +22,7 @@ class ProductCardRef extends StatefulWidget {
     Map<String, dynamic>? variation,
     List<Map<String, dynamic>> modifiers,
     Rect? imageRect,
-  )
-  onAddToCart;
+  ) onAddToCart;
 
   final int? imageCacheWidth;
   final int? imageCacheHeight;
@@ -157,7 +156,6 @@ class _ProductCardRefState extends State<ProductCardRef> {
           children: [
             AspectRatio(aspectRatio: 1.2, child: _imageSection()),
             _infoSection(),
-
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
               child: qty == 0 ? _addButton() : _counter(),
@@ -170,10 +168,8 @@ class _ProductCardRefState extends State<ProductCardRef> {
 
   Widget _imageSection() {
     final dpr = MediaQuery.of(context).devicePixelRatio;
-    final cacheWidth =
-        widget.imageCacheWidth ?? (220 * dpr).round();
-    final cacheHeight =
-        widget.imageCacheHeight ?? (220 * dpr).round();
+    final cacheWidth = widget.imageCacheWidth ?? (220 * dpr).round();
+    final cacheHeight = widget.imageCacheHeight ?? (220 * dpr).round();
 
     return Builder(
       builder: (ctx) {
@@ -244,7 +240,6 @@ class _ProductCardRefState extends State<ProductCardRef> {
               fontWeight: FontWeight.w600,
             ),
           ),
-
           Text(
             "₹${widget.price}",
             textAlign: TextAlign.center,
@@ -341,9 +336,8 @@ class _ProductCardRefState extends State<ProductCardRef> {
               flex: 2,
               child: _qtyInnerButton(
                 label: "+",
-                onTap: _needsCustomization
-                    ? _openCustomizationSheet
-                    : _addDirect,
+                onTap:
+                    _needsCustomization ? _openCustomizationSheet : _addDirect,
                 isTablet: isTablet,
                 isPrimary: true,
                 height: buttonHeight,
@@ -370,8 +364,7 @@ class _ProductCardRefState extends State<ProductCardRef> {
         height: height ?? (isTablet ? 32 : 28),
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color:
-              backgroundColor ??
+          color: backgroundColor ??
               (isPrimary ? const Color(0xFF1B8E3E) : Colors.white),
           borderRadius: BorderRadius.circular(8),
         ),
@@ -390,24 +383,24 @@ class _ProductCardRefState extends State<ProductCardRef> {
   Future<void> _openCustomizationSheet() async {
     final Map<String, dynamic>? result =
         await showModalBottomSheet<Map<String, dynamic>>(
-          context: context,
-          isScrollControlled: true,
-          useSafeArea: true,
-          backgroundColor: Colors.transparent,
-          builder: (context) => Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(context).viewInsets.bottom,
-            ),
-            child: _CustomizationSheet(
-              name: widget.name,
-              imageUrl: widget.imagePath,
-              variations: widget.variations,
-              modifiers: widget.modifiers,
-              onCancel: () => Navigator.pop(context),
-              onAdd: (data) => Navigator.pop(context, data),
-            ),
-          ),
-        );
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: _CustomizationSheet(
+          name: widget.name,
+          imageUrl: widget.imagePath,
+          variations: widget.variations,
+          modifiers: widget.modifiers,
+          onCancel: () => Navigator.pop(context),
+          onAdd: (data) => Navigator.pop(context, data),
+        ),
+      ),
+    );
 
     if (result != null) {
       final int addedQty = (result["qty"] as num?)?.toInt() ?? 1;
@@ -881,7 +874,11 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
                       });
                     }
                   : null,
-              icon: const Icon(Icons.shopping_cart_rounded, size: 18),
+              icon: const Icon(
+                Icons.shopping_cart_rounded,
+                size: 18,
+                color: Colors.white,
+              ),
               label: const FittedBox(
                 child: Text(
                   "ADD TO CART",
@@ -917,3 +914,7 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
     );
   }
 }
+///
+///
+///
+/// cz\ategori

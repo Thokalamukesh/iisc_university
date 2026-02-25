@@ -489,6 +489,7 @@ class _PaymentScreenState extends State<PaymentScreen>
           orderNumber: orderId!,
           language: "en",
           restaurantName: displayRestaurantName,
+          orderType: widget.orderType,
         ),
       ),
     );

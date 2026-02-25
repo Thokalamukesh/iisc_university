@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const Duration _heartbeatCheckInterval = Duration(seconds: 15);
 const Duration _heartbeatTimeout = Duration(seconds: 60);
@@ -58,6 +59,18 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
     );
   }
 
+  bool allowAutoOpen = true;
+  Future<void> refreshAllowAutoOpen() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final restaurantId = prefs.getString("restaurant_id");
+      allowAutoOpen = restaurantId != null && restaurantId.trim().isNotEmpty;
+    } catch (_) {
+      allowAutoOpen = true;
+    }
+  }
+  await refreshAllowAutoOpen();
+
   final int serviceStart = DateTime.now().millisecondsSinceEpoch;
   int lastHeartbeat = serviceStart;
   int lastOpenApp = 0;
@@ -80,6 +93,7 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
     } else {
       lastHeartbeat = DateTime.now().millisecondsSinceEpoch;
     }
+    refreshAllowAutoOpen();
   });
 
   service.on("ui_crash").listen((_) {
@@ -103,7 +117,10 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
     final startupGracePassed = elapsed >= _startupGracePeriod.inMilliseconds;
     final cooldownPassed = cooldownMs >= _openAppCooldown.inMilliseconds;
 
-    if (heartbeatExpired && cooldownPassed && (uiReady || startupGracePassed)) {
+    if (allowAutoOpen &&
+        heartbeatExpired &&
+        cooldownPassed &&
+        (uiReady || startupGracePassed)) {
       if (service is AndroidServiceInstance) {
         await service.openApp();
       }

@@ -4,6 +4,7 @@ import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
+import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -29,6 +30,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
   bool isLoading = true;
   bool hasError = false;
   bool _openingAdmin = false;
+  bool _openingOrder = false;
   bool _loadingRestaurant = false;
   VoidCallback? _onlineListener;
 
@@ -106,6 +108,13 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       if (gst != null && gst.toString().trim().isNotEmpty) {
         await prefs.setString("gst_number", gst.toString().trim());
       }
+
+      await ReceiptPrintMode.storeFromMap(
+        kioskSettings is Map ? kioskSettings : null,
+      );
+      await ReceiptPrintMode.storeFromMap(
+        restaurant is Map ? restaurant : null,
+      );
 
       List<String> tempBanners = [];
       if (media is List) {
@@ -416,7 +425,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     child: SizedBox(
                       width: isTablet ? 360 : 240,
                       child: _orderButton(
-                        "   EAT HERE",
+                        "EAT HERE",
                         Icons.restaurant_rounded,
                         Colors.green.shade700,
                         "dine_in",
@@ -619,10 +628,20 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     bool isTablet,
   ) {
     return InkWell(
-      onTap: () => Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => MainNavigation(orderType: type)),
-      ),
+      onTap: _openingOrder
+          ? null
+          : () {
+              setState(() => _openingOrder = true);
+              Navigator.pushReplacement(
+                context,
+                PageRouteBuilder(
+                  pageBuilder: (_, __, ___) =>
+                      MainNavigation(orderType: type),
+                  transitionDuration: Duration.zero,
+                  reverseTransitionDuration: Duration.zero,
+                ),
+              );
+            },
       child: Container(
         height: isTablet ? 100 : 100, // Reduced height for horizontal layout
         padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -642,13 +661,20 @@ class _WelcomeScreenState extends State<WelcomeScreen>
           children: [
             Icon(icon, size: isTablet ? 60 : 30, color: Colors.white),
             SizedBox(width: isTablet ? 15 : 8),
-            Flexible(
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w900,
-                  fontSize: isTablet ? 30 : 12,
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  softWrap: false,
+                  overflow: TextOverflow.fade,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: isTablet ? 30 : 12,
+                  ),
                 ),
               ),
             ),

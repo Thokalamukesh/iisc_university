@@ -21,9 +21,11 @@ class _SplashScreenState extends State<SplashScreen> {
   Timer? _navDelayTimer;
   bool _initStarted = false;
   bool _didNavigate = false;
+  bool _skipVisualSplash = false;
   @override
   void initState() {
     super.initState();
+    _skipVisualSplash = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _init();
     });
@@ -33,9 +35,6 @@ class _SplashScreenState extends State<SplashScreen> {
     if (_initStarted) return;
     _initStarted = true;
     try {
-      // Ensure splash image is decoded before navigating away.
-      await precacheImage(const AssetImage("assets/spalsh.jpeg"), context);
-      await _delay(const Duration(milliseconds: 800));
       final prefs = await SharedPreferences.getInstance();
       final restaurantId = prefs.getString("restaurant_id");
       final setupDone = prefs.getBool("kiosk_setup_done") ?? false;
@@ -88,6 +87,12 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_skipVisualSplash) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: SizedBox.shrink(),
+      );
+    }
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(

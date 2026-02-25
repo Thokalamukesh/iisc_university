@@ -119,6 +119,10 @@ class EpsonUSBPrinterService {
     await _invoke<void>('clearNativeLogs');
   }
 
+  
+
+ 
+
   Future<void> printData({
     required Map<String, dynamic> printer,
     required List<Map<String, dynamic>> printObject,

@@ -10,12 +10,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
   cupertino_icons: ^1.0.8
   dio: ^5.4.0
   provider: ^6.1.2
   shared_preferences: 2.2.2
   device_info_plus: ^10.1.0
-  uuid: ^3.0.7
+  uuid: ^4.4.0
   add_to_cart_animation: 2.0.3
   flutter_screenutil: ^5.9.0
   path_provider: 2.1.4
@@ -35,9 +36,6 @@ dependencies:
   wakelock_plus: 1.1.4
   url_launcher: 6.3.1
   flutter_background_service: ^5.1.0
-  
-
-
 
 dev_dependencies:
   flutter_test:
@@ -45,12 +43,11 @@ dev_dependencies:
   flutter_launcher_icons: ^0.11.0
   flutter_lints: ^4.0.0
 
-# Local override to silence deprecation warnings in the Android plugin.
+# Only keep this override
 dependency_overrides:
   flutter_background_service_android:
     path: third_party/flutter_background_service_android
 
-# 🔥 THIS IS THE MISSING PART (ADD THIS)
 flutter_icons:
   android: true
   ios: true

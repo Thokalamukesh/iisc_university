@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
@@ -11,6 +12,7 @@ import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/modules/product_model.dart';
 import 'package:api_selfxo_project/widget/product_card.dart';
 import 'best_selling.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class SelectionPainter extends CustomPainter {
   @override
@@ -108,6 +110,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   final Map<int, List<Map<String, dynamic>>> modifiersMap = {};
   Rect? _lastCartIconRect;
   List<dynamic> _rawProducts = [];
+  final Map<int, Map<String, dynamic>> _productOverrides = {};
+  static const String _overridesKey = "admin_product_overrides";
 
   void _goToWelcome(BuildContext context) {
     Navigator.of(context).pushAndRemoveUntil(
@@ -375,6 +379,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       });
     }
     try {
+      await _loadProductOverrides();
       final res = await KioskApi().getProducts();
 
       final List raw = res.data["products"] ?? [];
@@ -387,6 +392,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       final productMaps = List<Map<String, dynamic>>.from(
         parsed["products"] ?? const [],
       );
+      _applyOverridesToProductMaps(productMaps);
       final tempProducts = productMaps
           .map(
             (p) => ProductModel(
@@ -403,6 +409,18 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       final tempCategories = List<String>.from(
         parsed["categories"] ?? const <String>[],
       );
+      if (_productOverrides.isNotEmpty) {
+        final overrideCats = _productOverrides.values
+            .map((o) => o["category_name"] ?? o["category"])
+            .where((o) => o != null && o.toString().trim().isNotEmpty)
+            .map((o) => o.toString())
+            .toSet();
+        for (final c in overrideCats) {
+          if (!tempCategories.contains(c)) {
+            tempCategories.add(c);
+          }
+        }
+      }
       if (tempCategories.isEmpty || tempCategories.first != "All") {
         tempCategories.insert(0, "All");
       }
@@ -621,6 +639,82 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     _loadProducts();
   }
 
+  Future<void> _loadProductOverrides() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_overridesKey);
+      if (raw == null || raw.isEmpty) {
+        _productOverrides.clear();
+        return;
+      }
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      _productOverrides
+        ..clear()
+        ..addAll(
+          decoded.map(
+            (k, v) => MapEntry(
+              int.tryParse(k.toString()) ?? 0,
+              v is Map
+                  ? Map<String, dynamic>.from(v as Map)
+                  : <String, dynamic>{},
+            ),
+          )..removeWhere((key, value) => key == 0),
+        );
+    } catch (_) {}
+  }
+
+  void _applyOverridesToProductMaps(List<Map<String, dynamic>> productMaps) {
+    if (_productOverrides.isEmpty) return;
+    final Set<int> seenIds = {};
+    for (final p in productMaps) {
+      final id = p["id"];
+      final pid = id is int ? id : int.tryParse(id?.toString() ?? "");
+      if (pid == null) continue;
+      seenIds.add(pid);
+      final override = _productOverrides[pid];
+      if (override == null) continue;
+      final name = override["item_name"] ?? override["name"];
+      if (name != null && name.toString().trim().isNotEmpty) {
+        p["name"] = name;
+      }
+      final price = override["price"] ?? override["item_price"];
+      if (price != null) {
+        p["price"] = price;
+      }
+      final category = override["category_name"] ?? override["category"];
+      if (category != null && category.toString().trim().isNotEmpty) {
+        p["category"] = category;
+      }
+      final type = override["type"];
+      if (type != null) {
+        p["type"] = type;
+      }
+      final image =
+          override["item_photo_url"] ?? override["image"];
+      if (image != null && image.toString().trim().isNotEmpty) {
+        p["image"] = image;
+      }
+    }
+
+    // Add missing items from overrides (newly created products)
+    for (final entry in _productOverrides.entries) {
+      if (seenIds.contains(entry.key)) continue;
+      final o = entry.value;
+      final name = (o["item_name"] ?? o["name"] ?? "").toString();
+      final price = o["price"] ?? o["item_price"] ?? 0;
+      if (name.trim().isEmpty) continue;
+      productMaps.add({
+        "id": entry.key,
+        "name": name,
+        "category": o["category_name"] ?? o["category"] ?? "Others",
+        "price": price,
+        "image": o["item_photo_url"] ?? o["image"] ?? "",
+        "type": o["type"],
+      });
+    }
+  }
+
   List<String> _sectionCategories() {
     return categories.where((c) => c != "All").toList();
   }
@@ -785,7 +879,11 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    if (isLoading) return const Center(child: CircularProgressIndicator());
+    if (isLoading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
     if (hasError) {
       return const Scaffold(
         body: Center(
@@ -1952,12 +2050,41 @@ Map<String, dynamic> _parseProductsIsolate(List<dynamic> raw) {
       ]);
       final rawType = preferredType ?? fallbackType;
 
+      String pickName() {
+        final direct = item["item_name"] ?? item["name"];
+        if (direct != null && direct.toString().trim().isNotEmpty) {
+          return direct.toString();
+        }
+        final nestedName = nestedMap?["item_name"] ?? nestedMap?["name"];
+        return nestedName?.toString() ?? "";
+      }
+
+      dynamic pickPrice() {
+        final direct = item["price"] ?? item["item_price"];
+        if (direct != null) return direct;
+        return nestedMap?["price"] ?? nestedMap?["item_price"] ?? 0;
+      }
+
+      String pickImage() {
+        final direct = item["item_photo_url"] ?? item["image"];
+        if (direct != null && direct.toString().trim().isNotEmpty) {
+          return direct.toString();
+        }
+        final nestedImage =
+            nestedMap?["item_photo_url"] ?? nestedMap?["image"];
+        return nestedImage?.toString() ?? "";
+      }
+
+      final String name = pickName();
+      final dynamic price = pickPrice();
+      final String image = pickImage();
+
       products.add({
         "id": itemId,
-        "name": item["item_name"] ?? item["name"] ?? "",
+        "name": name,
         "category": catName,
-        "price": item["price"] ?? item["item_price"] ?? 0,
-        "image": item["item_photo_url"] ?? "",
+        "price": price,
+        "image": image,
         "type": ProductModel.normalizeType(rawType),
       });
 

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:api_selfxo_project/api/dio_client.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
@@ -5,7 +6,6 @@ import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class ProductsTab extends StatefulWidget {
   final VoidCallback onProductsUpdated;
@@ -20,6 +20,8 @@ class _ProductsTabState extends State<ProductsTab> {
   bool loading = true;
   Map<String, List<Map<String, dynamic>>> groupedProducts = {};
   Map<String, List<Map<String, dynamic>>> filteredProducts = {};
+  final Map<int, Map<String, dynamic>> _localOverrides = {};
+  static const String _overridesKey = "admin_product_overrides";
 
   final TextEditingController searchController = TextEditingController();
   String searchQuery = "";
@@ -27,7 +29,7 @@ class _ProductsTabState extends State<ProductsTab> {
   @override
   void initState() {
     super.initState();
-    _loadProducts();
+    _loadOverrides().then((_) => _loadProducts());
     searchController.addListener(_applySearch);
   }
 
@@ -44,6 +46,35 @@ class _ProductsTabState extends State<ProductsTab> {
     );
   }
 
+  Future<void> _loadOverrides() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_overridesKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      _localOverrides.clear();
+      decoded.forEach((key, value) {
+        final id = int.tryParse(key.toString());
+        if (id == null) return;
+        if (value is Map) {
+          _localOverrides[id] =
+              Map<String, dynamic>.from(value as Map);
+        }
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _persistOverrides() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = _localOverrides.map(
+        (k, v) => MapEntry(k.toString(), v),
+      );
+      await prefs.setString(_overridesKey, jsonEncode(encoded));
+    } catch (_) {}
+  }
+
   // ================= LOAD DATA =================
   Future<void> _loadProducts() async {
     if (!mounted) return;
@@ -56,15 +87,65 @@ class _ProductsTabState extends State<ProductsTab> {
       final List items = res.data["items"] ?? res.data["data"] ?? [];
       groupedProducts.clear();
 
-      for (final item in items) {
+      for (final raw in items) {
+        if (raw is! Map) continue;
+        final item = Map<String, dynamic>.from(raw);
+        final nested = item["item"];
+        final nestedMap =
+            nested is Map ? Map<String, dynamic>.from(nested) : null;
+
+        final directName = item["item_name"] ?? item["name"];
+        if (directName == null || directName.toString().trim().isEmpty) {
+          final nestedName = nestedMap?["item_name"] ?? nestedMap?["name"];
+          if (nestedName != null && nestedName.toString().trim().isNotEmpty) {
+            item["item_name"] = nestedName;
+          }
+        }
+
+        final directPrice = item["price"] ?? item["item_price"];
+        if (directPrice == null) {
+          final nestedPrice = nestedMap?["price"] ?? nestedMap?["item_price"];
+          if (nestedPrice != null) {
+            item["price"] = nestedPrice;
+          }
+        }
+
+        final directImage = item["item_photo_url"] ?? item["image"];
+        if (directImage == null || directImage.toString().trim().isEmpty) {
+          final nestedImage =
+              nestedMap?["item_photo_url"] ?? nestedMap?["image"];
+          if (nestedImage != null && nestedImage.toString().trim().isNotEmpty) {
+            item["item_photo_url"] = nestedImage;
+          }
+        }
+
+        if (item["type"] == null && nestedMap?["type"] != null) {
+          item["type"] = nestedMap?["type"];
+        }
+
+        item["id"] ??= nestedMap?["id"] ?? nestedMap?["item_id"];
+        item["item_id"] ??= nestedMap?["item_id"] ?? nestedMap?["id"];
+
+        final directCategory =
+            item["category_name"] ?? item["category"] ?? item["cat_name"];
+        if (directCategory == null ||
+            directCategory.toString().trim().isEmpty) {
+          final nestedCategory =
+              nestedMap?["category_name"] ?? nestedMap?["category"];
+          if (nestedCategory != null &&
+              nestedCategory.toString().trim().isNotEmpty) {
+            item["category_name"] = nestedCategory;
+          }
+        }
+
+        _applyLocalOverride(item);
         final category = item["category_name"] ?? "Uncategorized";
         groupedProducts.putIfAbsent(category, () => []);
         groupedProducts[category]!.add(item);
       }
 
       _applySearch();
-    } catch (e) {
-    }
+    } catch (e) {}
 
     if (mounted) setState(() => loading = false);
   }
@@ -110,7 +191,7 @@ class _ProductsTabState extends State<ProductsTab> {
       final List<Map<String, dynamic>> matches = searchQuery.isEmpty
           ? List<Map<String, dynamic>>.from(items)
           : items.where((item) {
-              final name = (item["item_name"] ?? "").toString().toLowerCase();
+              final name = _displayName(item).toLowerCase();
               return name.contains(searchQuery);
             }).toList();
 
@@ -133,6 +214,104 @@ class _ProductsTabState extends State<ProductsTab> {
     return (cat["category_name"] ?? cat["name"] ?? "Category").toString();
   }
 
+  int? _itemId(Map<String, dynamic> item) {
+    final dynamic raw = item["id"] ?? item["item_id"] ?? item["itemId"];
+    if (raw == null) return null;
+    if (raw is int) return raw;
+    return int.tryParse(raw.toString());
+  }
+
+  int? _extractCreatedItemId(dynamic data) {
+    if (data == null) return null;
+    if (data is Map) {
+      dynamic raw =
+          data["id"] ??
+          data["item_id"] ??
+          data["itemId"] ??
+          (data["item"] is Map ? data["item"]["id"] : null) ??
+          (data["item"] is Map ? data["item"]["item_id"] : null) ??
+          (data["data"] is Map ? data["data"]["id"] : null) ??
+          (data["product"] is Map ? data["product"]["id"] : null);
+      if (raw != null) {
+        if (raw is int) return raw;
+        return int.tryParse(raw.toString());
+      }
+    }
+    return null;
+  }
+
+  Future<int?> _resolveCreatedItemId({
+    required String name,
+    required num price,
+    int? categoryId,
+    int? menuId,
+  }) async {
+    try {
+      final res = await AdminApi().getItems();
+      final List items =
+          res.data["items"] ?? res.data["data"] ?? const [];
+      for (final raw in items) {
+        if (raw is! Map) continue;
+        final item = Map<String, dynamic>.from(raw);
+        final nested = item["item"];
+        final nestedMap =
+            nested is Map ? Map<String, dynamic>.from(nested) : null;
+        final id = _itemId(item) ?? _itemId(nestedMap ?? {});
+        if (id == null) continue;
+        final itemName = (item["item_name"] ??
+                nestedMap?["item_name"] ??
+                item["name"] ??
+                nestedMap?["name"] ??
+                "")
+            .toString()
+            .trim();
+        final itemPrice = num.tryParse(
+              "${item["price"] ?? item["item_price"] ?? nestedMap?["price"] ?? nestedMap?["item_price"] ?? ""}",
+            ) ??
+            0;
+        final itemCategoryId = _categoryId(item) ??
+            _categoryId({"id": item["item_category_id"]});
+        final itemMenuId = _menuId(item) ?? _menuId({"id": item["menu_id"]});
+        if (itemName == name &&
+            itemPrice == price &&
+            (categoryId == null || itemCategoryId == categoryId) &&
+            (menuId == null || itemMenuId == menuId)) {
+          return id;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  String _displayName(Map<String, dynamic> item) {
+    final direct = item["item_name"] ?? item["name"];
+    if (direct != null && direct.toString().trim().isNotEmpty) {
+      return direct.toString();
+    }
+    final nested = item["item"];
+    if (nested is Map) {
+      final n = nested["item_name"] ?? nested["name"];
+      if (n != null && n.toString().trim().isNotEmpty) {
+        return n.toString();
+      }
+    }
+    return "";
+  }
+
+  void _applyLocalOverride(Map<String, dynamic> item) {
+    final id = _itemId(item);
+    if (id == null) return;
+    final override = _localOverrides[id];
+    if (override == null) return;
+    item.addAll(override);
+    final nested = item["item"];
+    if (nested is Map) {
+      for (final entry in override.entries) {
+        nested[entry.key] = entry.value;
+      }
+    }
+  }
+
   int? _menuId(Map<String, dynamic> menu) {
     final dynamic raw = menu["menu_id"] ?? menu["id"];
     if (raw == null) return null;
@@ -152,6 +331,7 @@ class _ProductsTabState extends State<ProductsTab> {
     bool hasVariations = false;
     final List<TextEditingController> variationNameCtrls = [];
     final List<TextEditingController> variationPriceCtrls = [];
+    final List<int?> variationIds = [];
     int? selectedCategoryId;
     int? selectedMenuId;
     String error = "";
@@ -160,9 +340,10 @@ class _ProductsTabState extends State<ProductsTab> {
     List<Map<String, dynamic>> categories = [];
     List<Map<String, dynamic>> menus = [];
 
-    void addVariationRow({String? name, String? price}) {
+    void addVariationRow({String? name, String? price, int? id}) {
       variationNameCtrls.add(TextEditingController(text: name ?? ""));
       variationPriceCtrls.add(TextEditingController(text: price ?? ""));
+      variationIds.add(id);
     }
 
     void disposeVariationCtrls() {
@@ -184,8 +365,7 @@ class _ProductsTabState extends State<ProductsTab> {
               try {
                 final res = await AdminApi().getItems();
                 final List rawMenus = res.data["menus"] ?? [];
-                final List rawCats =
-                    res.data["categoryList"] ??
+                final List rawCats = res.data["categoryList"] ??
                     res.data["categories"] ??
                     res.data["data"] ??
                     [];
@@ -210,10 +390,8 @@ class _ProductsTabState extends State<ProductsTab> {
                 categories = byId.values.toList();
                 if (categories.isNotEmpty) {
                   selectedCategoryId ??= _categoryId(categories.first);
-                  final ids = categories
-                      .map(_categoryId)
-                      .whereType<int>()
-                      .toSet();
+                  final ids =
+                      categories.map(_categoryId).whereType<int>().toSet();
                   if (selectedCategoryId != null &&
                       !ids.contains(selectedCategoryId)) {
                     selectedCategoryId = _categoryId(categories.first);
@@ -222,551 +400,624 @@ class _ProductsTabState extends State<ProductsTab> {
                 if (menus.isNotEmpty) {
                   selectedMenuId ??= _menuId(menus.first);
                   final ids = menus.map(_menuId).whereType<int>().toSet();
-                  if (selectedMenuId != null &&
-                      !ids.contains(selectedMenuId)) {
+                  if (selectedMenuId != null && !ids.contains(selectedMenuId)) {
                     selectedMenuId = _menuId(menus.first);
                   }
                 }
-            } catch (_) {
-              categories = [];
-              menus = [];
-            } finally {
-              if (mounted) {
-                setState(() => loadingCats = false);
+              } catch (_) {
+                categories = [];
+                menus = [];
+              } finally {
+                if (mounted) {
+                  setState(() => loadingCats = false);
+                }
               }
             }
-          }
 
-          if (loadingCats) {
-            loadCats();
-          }
-          if (hasVariations && variationNameCtrls.isEmpty) {
-            addVariationRow();
-          }
+            if (loadingCats) {
+              loadCats();
+            }
+            if (hasVariations && variationNameCtrls.isEmpty) {
+              addVariationRow();
+            }
 
-          final labelStyle = TextStyle(
-            fontWeight: FontWeight.w600,
-            color: Colors.grey.shade700,
-            fontSize: 12,
-          );
-
-          InputDecoration inputDecoration(String hint) {
-            return InputDecoration(
-              hintText: hint,
-              filled: true,
-              fillColor: Colors.grey.shade50,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 12,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.grey.shade300),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.grey.shade300),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Color(0xFF9F342C)),
-              ),
+            final labelStyle = TextStyle(
+              fontWeight: FontWeight.w600,
+              color: Colors.grey.shade700,
+              fontSize: 12,
             );
-          }
 
-          Widget fieldBlock(String label, Widget child) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: labelStyle),
-                const SizedBox(height: 6),
-                child,
-              ],
-            );
-          }
-
-          Widget colorSquare(Color color) {
-            return Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: Colors.grey.shade300),
-              ),
-              child: Center(
-                child: Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
+            InputDecoration inputDecoration(String hint) {
+              return InputDecoration(
+                hintText: hint,
+                filled: true,
+                fillColor: Colors.grey.shade50,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
                 ),
-              ),
-            );
-          }
-
-          Widget typeOption({
-            required String value,
-            required String label,
-            required Widget leading,
-          }) {
-            final selected = type == value;
-            return InkWell(
-              onTap: () => setState(() => type = value),
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                width: 110,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
+                border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: selected
-                        ? const Color(0xFF9F342C)
-                        : Colors.grey.shade300,
-                    width: selected ? 2 : 1,
-                  ),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
                 ),
-                child: Row(
-                  children: [
-                    leading,
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        label,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey.shade800,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
                 ),
-              ),
-            );
-          }
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFF9F342C)),
+                ),
+              );
+            }
 
-          return AlertDialog(
-            backgroundColor: Colors.white,
-            surfaceTintColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-            ),
-            insetPadding: const EdgeInsets.symmetric(
-              horizontal: 20,
-              vertical: 24,
-            ),
-            titlePadding: const EdgeInsets.fromLTRB(20, 18, 12, 8),
-            contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
-            title: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    "Add Product",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+            Widget fieldBlock(String label, Widget child) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label, style: labelStyle),
+                  const SizedBox(height: 6),
+                  child,
+                ],
+              );
+            }
+
+            Widget colorSquare(Color color) {
+              return Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: Center(
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
-                IconButton(
-                  onPressed: () => Navigator.pop(dialogContext),
-                  icon: const Icon(
-                    Icons.close_rounded,
-                    color: Colors.redAccent,
+              );
+            }
+
+            Widget typeOption({
+              required String value,
+              required String label,
+              required Widget leading,
+            }) {
+              final selected = type == value;
+              return InkWell(
+                onTap: () => setState(() => type = value),
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  width: 110,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: selected
+                          ? const Color(0xFF9F342C)
+                          : Colors.grey.shade300,
+                      width: selected ? 2 : 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      leading,
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          label,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.grey.shade800,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ],
-            ),
-            content: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: 420,
-                maxHeight: MediaQuery.of(context).size.height * 0.8,
+              );
+            }
+
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
               ),
-              child: loadingCats
-                  ? const Center(child: CircularProgressIndicator())
-                  : SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          fieldBlock(
-                            "Name",
-                            TextField(
-                              controller: nameCtrl,
-                              decoration: inputDecoration("Product name"),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Price",
-                            TextField(
-                              controller: priceCtrl,
-                              keyboardType: TextInputType.number,
-                              decoration: inputDecoration("0"),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Parcel Charge",
-                            TextField(
-                              controller: parcelCtrl,
-                              keyboardType: TextInputType.number,
-                              decoration: inputDecoration("0"),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Menu",
-                            menus.isNotEmpty
-                                ? DropdownButtonFormField<int>(
-                                    value: selectedMenuId,
-                                    decoration: inputDecoration("Select menu"),
-                                    isExpanded: true,
-                                    items: [
-                                      for (final m in menus)
-                                        DropdownMenuItem<int>(
-                                          value: _menuId(m),
-                                          child: Text(_menuName(m)),
-                                        ),
-                                    ],
-                                    onChanged: (val) => setState(() {
-                                      selectedMenuId = val;
-                                    }),
-                                  )
-                                : const Text(
-                                    "No menus available",
-                                    style: TextStyle(color: Colors.red),
-                                  ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Category",
-                            categories.isNotEmpty
-                                ? DropdownButtonFormField<int>(
-                                    value: selectedCategoryId,
-                                    decoration: inputDecoration(
-                                      "Select category",
-                                    ),
-                                    isExpanded: true,
-                                    items: [
-                                      for (final c in categories)
-                                        DropdownMenuItem<int>(
-                                          value: _categoryId(c),
-                                          child: Text(_categoryName(c)),
-                                        ),
-                                    ],
-                                    onChanged: (val) => setState(() {
-                                      selectedCategoryId = val;
-                                    }),
-                                  )
-                                : const Text(
-                                    "No categories available",
-                                    style: TextStyle(color: Colors.red),
-                                  ),
-                          ),
-                          const SizedBox(height: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text("Type", style: labelStyle),
-                              const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 10,
-                                runSpacing: 10,
-                                children: [
-                                  typeOption(
-                                    value: "veg",
-                                    label: "Veg",
-                                    leading: colorSquare(Colors.green),
-                                  ),
-                                  typeOption(
-                                    value: "non-veg",
-                                    label: "Non Veg",
-                                    leading: colorSquare(
-                                      const Color(0xFF8D4B2A),
-                                    ),
-                                  ),
-                                  typeOption(
-                                    value: "egg",
-                                    label: "Egg",
-                                    leading: const Icon(
-                                      Icons.egg_alt_outlined,
-                                      size: 18,
-                                      color: Colors.orange,
-                                    ),
-                                  ),
-                                  typeOption(
-                                    value: "drink",
-                                    label: "Drink",
-                                    leading: const Icon(
-                                      Icons.local_drink_outlined,
-                                      size: 18,
-                                      color: Colors.blue,
-                                    ),
-                                  ),
-                                  typeOption(
-                                    value: "others",
-                                    label: "Other",
-                                    leading: const Icon(
-                                      Icons.category_outlined,
-                                      size: 18,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
+              insetPadding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 24,
+              ),
+              titlePadding: const EdgeInsets.fromLTRB(20, 18, 12, 8),
+              contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+              title: Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      "Add Product",
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      color: Colors.redAccent,
+                    ),
+                  ),
+                ],
+              ),
+              content: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: 420,
+                  maxHeight: MediaQuery.of(context).size.height * 0.8,
+                ),
+                child: loadingCats
+                    ? const Center(child: CircularProgressIndicator())
+                    : SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            fieldBlock(
+                              "Name",
+                              TextField(
+                                controller: nameCtrl,
+                                decoration: inputDecoration("Product name"),
                               ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Switch.adaptive(
-                                value: hasVariations,
-                                onChanged: (val) => setState(() {
-                                  hasVariations = val;
-                                  if (hasVariations &&
-                                      variationNameCtrls.isEmpty) {
-                                    addVariationRow();
-                                  }
-                                }),
-                                activeColor: const Color(0xFF9F342C),
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Price",
+                              TextField(
+                                controller: priceCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: inputDecoration("0"),
                               ),
-                              const SizedBox(width: 8),
-                              Text("Is Variation Product", style: labelStyle),
-                            ],
-                          ),
-                          if (hasVariations) ...[
-                            const SizedBox(height: 10),
-                            Row(
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Parcel Charge",
+                              TextField(
+                                controller: parcelCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: inputDecoration("0"),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Menu",
+                              menus.isNotEmpty
+                                  ? DropdownButtonFormField<int>(
+                                      value: selectedMenuId,
+                                      decoration:
+                                          inputDecoration("Select menu"),
+                                      isExpanded: true,
+                                      items: [
+                                        for (final m in menus)
+                                          DropdownMenuItem<int>(
+                                            value: _menuId(m),
+                                            child: Text(_menuName(m)),
+                                          ),
+                                      ],
+                                      onChanged: (val) => setState(() {
+                                        selectedMenuId = val;
+                                      }),
+                                    )
+                                  : const Text(
+                                      "No menus available",
+                                      style: TextStyle(color: Colors.red),
+                                    ),
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Category",
+                              categories.isNotEmpty
+                                  ? DropdownButtonFormField<int>(
+                                      value: selectedCategoryId,
+                                      decoration: inputDecoration(
+                                        "Select category",
+                                      ),
+                                      isExpanded: true,
+                                      items: [
+                                        for (final c in categories)
+                                          DropdownMenuItem<int>(
+                                            value: _categoryId(c),
+                                            child: Text(_categoryName(c)),
+                                          ),
+                                      ],
+                                      onChanged: (val) => setState(() {
+                                        selectedCategoryId = val;
+                                      }),
+                                    )
+                                  : const Text(
+                                      "No categories available",
+                                      style: TextStyle(color: Colors.red),
+                                    ),
+                            ),
+                            const SizedBox(height: 12),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text(
-                                  "Variations",
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                                const Spacer(),
-                                TextButton.icon(
-                                  onPressed: () => setState(() {
-                                    addVariationRow();
-                                  }),
-                                  icon: const Icon(Icons.add),
-                                  label: const Text("Add"),
+                                Text("Type", style: labelStyle),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 10,
+                                  runSpacing: 10,
+                                  children: [
+                                    typeOption(
+                                      value: "veg",
+                                      label: "Veg",
+                                      leading: colorSquare(Colors.green),
+                                    ),
+                                    typeOption(
+                                      value: "non-veg",
+                                      label: "Non Veg",
+                                      leading: colorSquare(
+                                        const Color(0xFF8D4B2A),
+                                      ),
+                                    ),
+                                    typeOption(
+                                      value: "egg",
+                                      label: "Egg",
+                                      leading: const Icon(
+                                        Icons.egg_alt_outlined,
+                                        size: 18,
+                                        color: Colors.orange,
+                                      ),
+                                    ),
+                                    typeOption(
+                                      value: "drink",
+                                      label: "Drink",
+                                      leading: const Icon(
+                                        Icons.local_drink_outlined,
+                                        size: 18,
+                                        color: Colors.blue,
+                                      ),
+                                    ),
+                                    typeOption(
+                                      value: "others",
+                                      label: "Other",
+                                      leading: const Icon(
+                                        Icons.category_outlined,
+                                        size: 18,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 6),
-                            Column(
-                              children: List.generate(
-                                variationNameCtrls.length,
-                                (i) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 8),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        flex: 3,
-                                        child: TextField(
-                                          controller: variationNameCtrls[i],
-                                          decoration: const InputDecoration(
-                                            labelText: "Name",
-                                            border: OutlineInputBorder(),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Switch.adaptive(
+                                  value: hasVariations,
+                                  onChanged: (val) => setState(() {
+                                    hasVariations = val;
+                                    if (hasVariations &&
+                                        variationNameCtrls.isEmpty) {
+                                      addVariationRow();
+                                    }
+                                  }),
+                                  activeColor: const Color(0xFF9F342C),
+                                ),
+                                const SizedBox(width: 8),
+                                Text("Is Variation Product", style: labelStyle),
+                              ],
+                            ),
+                            if (hasVariations) ...[
+                              const SizedBox(height: 10),
+                              Row(
+                                children: [
+                                  const Text(
+                                    "Variations",
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  TextButton.icon(
+                                    onPressed: () => setState(() {
+                                      addVariationRow();
+                                    }),
+                                    icon: const Icon(Icons.add),
+                                    label: const Text("Add"),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Column(
+                                children: List.generate(
+                                  variationNameCtrls.length,
+                                  (i) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          flex: 3,
+                                          child: TextField(
+                                            controller: variationNameCtrls[i],
+                                            decoration: const InputDecoration(
+                                              labelText: "Name",
+                                              border: OutlineInputBorder(),
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        flex: 2,
-                                        child: TextField(
-                                          controller: variationPriceCtrls[i],
-                                          keyboardType: TextInputType.number,
-                                          decoration: const InputDecoration(
-                                            labelText: "Price",
-                                            border: OutlineInputBorder(),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          flex: 2,
+                                          child: TextField(
+                                            controller: variationPriceCtrls[i],
+                                            keyboardType: TextInputType.number,
+                                            decoration: const InputDecoration(
+                                              labelText: "Price",
+                                              border: OutlineInputBorder(),
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      IconButton(
-                                        onPressed: () => setState(() {
-                                          variationNameCtrls.removeAt(i);
-                                          variationPriceCtrls.removeAt(i);
-                                        }),
-                                        icon: const Icon(Icons.close_rounded),
-                                      ),
-                                    ],
+                                        IconButton(
+                                          onPressed: () => setState(() {
+                                            variationNameCtrls.removeAt(i);
+                                            variationPriceCtrls.removeAt(i);
+                                          }),
+                                          icon: const Icon(Icons.close_rounded),
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          ],
-                          if (error.isNotEmpty) ...[
+                            ],
+                            if (error.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withOpacity(0.08),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: Colors.red.withOpacity(0.2),
+                                  ),
+                                ),
+                                child: Text(
+                                  error,
+                                  style: const TextStyle(
+                                    color: Colors.red,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 12),
-                            Container(
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: Colors.red.withOpacity(0.08),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: Colors.red.withOpacity(0.2),
-                                ),
-                              ),
-                              child: Text(
-                                error,
-                                style: const TextStyle(
-                                  color: Colors.red,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            height: 44,
-                            child: ElevatedButton(
-                              onPressed: saving
-                                  ? null
-                                  : () async {
-                                      final name = nameCtrl.text.trim();
-                                      final price = num.tryParse(
-                                        priceCtrl.text.trim(),
-                                      );
-                                      final parcel = num.tryParse(
-                                        parcelCtrl.text.trim(),
-                                      );
-                                      if (name.isEmpty || price == null) {
-                                        setState(() {
-                                          error = "Enter valid name and price";
-                                        });
-                                        return;
-                                      }
-                                      if (selectedCategoryId == null) {
-                                        setState(() {
-                                          error = "Please select a category";
-                                        });
-                                        return;
-                                      }
-                                      if (selectedMenuId == null) {
-                                        setState(() {
-                                          error = "Please select a menu";
-                                        });
-                                        return;
-                                      }
-                                      final variations =
-                                          <Map<String, dynamic>>[];
-                                      if (hasVariations) {
-                                        for (
-                                          int i = 0;
-                                          i < variationNameCtrls.length;
-                                          i++
-                                        ) {
-                                          final vName = variationNameCtrls[i]
-                                              .text
-                                              .trim();
-                                          final vPrice = num.tryParse(
-                                            variationPriceCtrls[i].text.trim(),
-                                          );
-                                          if (vName.isEmpty || vPrice == null) {
-                                            continue;
+                            SizedBox(
+                                width: double.infinity,
+                                height: 44,
+                                child: ElevatedButton(
+                                  onPressed: saving
+                                      ? null
+                                      : () async {
+                                          final name = nameCtrl.text.trim();
+                                          final price = num.tryParse(
+                                              priceCtrl.text.trim());
+                                          final parcel = num.tryParse(
+                                              parcelCtrl.text.trim());
+
+                                          // 🔹 Basic validation
+                                          if (name.isEmpty || price == null) {
+                                            setState(() {
+                                              error =
+                                                  "Enter valid name and price";
+                                            });
+                                            return;
                                           }
-                                          variations.add({
-                                            "variation": vName,
-                                            "price": vPrice,
-                                          });
-                                        }
-                                        if (variations.isEmpty) {
+
+                                          if (selectedCategoryId == null) {
+                                            setState(() {
+                                              error =
+                                                  "Please select a category";
+                                            });
+                                            return;
+                                          }
+
+                                          if (selectedMenuId == null) {
+                                            setState(() {
+                                              error = "Please select a menu";
+                                            });
+                                            return;
+                                          }
+
+                                          // 🔹 Prepare variations
+                                          final List<Map<String, dynamic>>
+                                              variations = [];
+
+                                          if (hasVariations) {
+                                            for (int i = 0;
+                                                i < variationNameCtrls.length;
+                                                i++) {
+                                              final vName =
+                                                  variationNameCtrls[i]
+                                                      .text
+                                                      .trim();
+                                              final vPrice = num.tryParse(
+                                                  variationPriceCtrls[i]
+                                                      .text
+                                                      .trim());
+
+                                              if (vName.isEmpty ||
+                                                  vPrice == null) continue;
+
+                                              final Map<String, dynamic> v = {
+                                                "variation": vName,
+                                                "price": vPrice,
+                                              };
+
+                                              // ✅ FIXED NULL ERROR HERE
+                                              final id = variationIds[i];
+                                              if (id != null) {
+                                                v["id"] =
+                                                    id; // No more int? error
+                                              }
+
+                                              variations.add(v);
+                                            }
+
+                                            if (variations.isEmpty) {
+                                              setState(() {
+                                                error =
+                                                    "Add at least one variation";
+                                              });
+                                              return;
+                                            }
+                                          }
+
                                           setState(() {
-                                            error =
-                                                "Add at least one variation";
+                                            saving = true;
+                                            error = "";
                                           });
-                                          return;
-                                        }
-                                      }
-                                      setState(() {
-                                        saving = true;
-                                        error = "";
-                                      });
-                                      try {
-                                        final body = {
-                                          "item_name": name,
-                                          "price": price,
-                                          "item_category_id":
-                                              selectedCategoryId,
-                                          "category_id": selectedCategoryId,
-                                          "is_available": 1,
-                                          "type": type,
-                                          "menu_id": selectedMenuId,
-                                        };
-                                        body["take_away_charge"] = parcel ?? 0;
-                                        if (hasVariations) {
-                                          body["has_variations"] = 1;
-                                          body["has_variation"] = 1;
-                                          body["variations"] = variations;
-                                        } else {
-                                          body["has_variations"] = 0;
-                                          body["has_variation"] = 0;
-                                          body["variations"] = [];
-                                        }
-                                        await _attachBranchAndRestaurant(body);
-                                        await AdminApi().createItem(body);
-                                        if (!mounted) return;
-                                        Navigator.pop(dialogContext);
-                                        await _loadProducts();
-                                        KioskMemoryService
-                                            .instance
-                                            .mediaRefreshTick
-                                            .value++;
-                                        widget.onProductsUpdated();
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          const SnackBar(
-                                            content: Text(
-                                              "Product added successfully",
-                                            ),
-                                            backgroundColor: Colors.green,
-                                            duration: Duration(seconds: 1),
-                                          ),
-                                        );
-                                      } catch (e) {
-                                        setState(() {
-                                          error = "Failed to add product";
-                                          saving = false;
-                                        });
-                                      }
-                                    },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF9F342C),
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              child: saving
-                                  ? const SizedBox(
-                                      height: 18,
-                                      width: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : const Text(
-                                      "Add Product",
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
+
+                                          try {
+                                            final Map<String, dynamic> body = {
+                                              "item_name": name,
+                                              "price": price,
+                                              "item_category_id":
+                                                  selectedCategoryId!,
+                                              "category_id":
+                                                  selectedCategoryId!,
+                                              "is_available": 1,
+                                              "type": type,
+                                              "menu_id": selectedMenuId!,
+                                              "take_away_charge": parcel ?? 0,
+                                              "has_variations":
+                                                  hasVariations ? 1 : 0,
+                                              "has_variation":
+                                                  hasVariations ? 1 : 0,
+                                              "variations": hasVariations
+                                                  ? variations
+                                                  : [],
+                                            };
+
+                                            await _attachBranchAndRestaurant(
+                                                body);
+                                          final res =
+                                              await AdminApi().createItem(
+                                            body,
+                                          );
+                                          int? createdId =
+                                              _extractCreatedItemId(res.data);
+                                          createdId ??= await _resolveCreatedItemId(
+                                            name: name,
+                                            price: price,
+                                            categoryId: selectedCategoryId,
+                                            menuId: selectedMenuId,
+                                          );
+                                          if (createdId != null) {
+                                            String? catName;
+                                            if (selectedCategoryId != null) {
+                                              final found = categories
+                                                  .where(
+                                                    (c) =>
+                                                        _categoryId(c) ==
+                                                        selectedCategoryId,
+                                                  )
+                                                  .toList();
+                                              if (found.isNotEmpty) {
+                                                catName = _categoryName(
+                                                  found.first,
+                                                );
+                                              }
+                                            }
+                                            _localOverrides[createdId] = {
+                                              "item_name": name,
+                                              "name": name,
+                                              "price": price,
+                                              "item_price": price,
+                                              "take_away_charge": parcel ?? 0,
+                                              "type": type,
+                                              "menu_id": selectedMenuId,
+                                              "item_category_id":
+                                                  selectedCategoryId,
+                                              "category_id": selectedCategoryId,
+                                              "category_name":
+                                                  catName ?? "Uncategorized",
+                                              "has_variations":
+                                                  hasVariations ? 1 : 0,
+                                              "has_variation":
+                                                  hasVariations ? 1 : 0,
+                                              "variations": hasVariations
+                                                  ? variations
+                                                  : [],
+                                              "id": createdId,
+                                              "item_id": createdId,
+                                            };
+                                            await _persistOverrides();
+                                          }
+
+                                            if (!mounted) return;
+
+                                            Navigator.pop(dialogContext);
+                                            await _loadProducts();
+
+                                            KioskMemoryService.instance
+                                                .mediaRefreshTick.value++;
+
+                                            widget.onProductsUpdated();
+
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              const SnackBar(
+                                                content: Text(
+                                                    "Product added successfully"),
+                                                backgroundColor: Colors.green,
+                                                duration: Duration(seconds: 1),
+                                              ),
+                                            );
+                                          } catch (e) {
+                                            setState(() {
+                                              error = "Failed to add product";
+                                              saving = false;
+                                            });
+                                          }
+                                        },
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF9F342C),
+                                    foregroundColor: Colors.white,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
                                     ),
-                            ),
-                          ),
-                        ],
+                                  ),
+                                  child: saving
+                                      ? const SizedBox(
+                                          height: 18,
+                                          width: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : const Text(
+                                          "Add Product",
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.bold),
+                                        ),
+                                )),
+                          ],
+                        ),
                       ),
-                    ),
-            ),
+              ),
             );
           },
         ),
@@ -794,8 +1045,8 @@ class _ProductsTabState extends State<ProductsTab> {
         (product["has_variations"] ?? product["has_variation"]) == 1;
     final List<TextEditingController> variationNameCtrls = [];
     final List<TextEditingController> variationPriceCtrls = [];
-    int? selectedCategoryId =
-        _categoryId(product) ??
+    final List<int?> variationIds = [];
+    int? selectedCategoryId = _categoryId(product) ??
         _categoryId({"id": product["item_category_id"]});
     int? selectedMenuId =
         _menuId(product) ?? _menuId({"id": product["menu_id"]});
@@ -806,9 +1057,10 @@ class _ProductsTabState extends State<ProductsTab> {
     List<Map<String, dynamic>> menus = [];
     final List variationsFromApi = (product["variations"] as List?) ?? const [];
 
-    void addVariationRow({String? name, String? price}) {
+    void addVariationRow({String? name, String? price, int? id}) {
       variationNameCtrls.add(TextEditingController(text: name ?? ""));
       variationPriceCtrls.add(TextEditingController(text: price ?? ""));
+      variationIds.add(id);
     }
 
     if (hasVariations && variationNameCtrls.isEmpty) {
@@ -817,6 +1069,7 @@ class _ProductsTabState extends State<ProductsTab> {
           addVariationRow(
             name: v["variation"]?.toString(),
             price: v["price"]?.toString(),
+            id: v["id"] is int ? v["id"] as int : int.tryParse("${v["id"]}"),
           );
         }
       }
@@ -842,8 +1095,7 @@ class _ProductsTabState extends State<ProductsTab> {
               try {
                 final res = await AdminApi().getItems();
                 final List rawMenus = res.data["menus"] ?? [];
-                final List rawCats =
-                    res.data["categoryList"] ??
+                final List rawCats = res.data["categoryList"] ??
                     res.data["categories"] ??
                     res.data["data"] ??
                     [];
@@ -868,10 +1120,8 @@ class _ProductsTabState extends State<ProductsTab> {
                 categories = byId.values.toList();
                 if (categories.isNotEmpty) {
                   selectedCategoryId ??= _categoryId(categories.first);
-                  final ids = categories
-                      .map(_categoryId)
-                      .whereType<int>()
-                      .toSet();
+                  final ids =
+                      categories.map(_categoryId).whereType<int>().toSet();
                   if (selectedCategoryId != null &&
                       !ids.contains(selectedCategoryId)) {
                     selectedCategoryId = _categoryId(categories.first);
@@ -880,563 +1130,668 @@ class _ProductsTabState extends State<ProductsTab> {
                 if (menus.isNotEmpty) {
                   selectedMenuId ??= _menuId(menus.first);
                   final ids = menus.map(_menuId).whereType<int>().toSet();
-                  if (selectedMenuId != null &&
-                      !ids.contains(selectedMenuId)) {
+                  if (selectedMenuId != null && !ids.contains(selectedMenuId)) {
                     selectedMenuId = _menuId(menus.first);
                   }
                 }
-            } catch (_) {
-              categories = [];
-              menus = [];
-            } finally {
-              if (mounted) {
-                setState(() => loadingCats = false);
+              } catch (_) {
+                categories = [];
+                menus = [];
+              } finally {
+                if (mounted) {
+                  setState(() => loadingCats = false);
+                }
               }
             }
-          }
 
-          if (loadingCats) {
-            loadCats();
-          }
-          if (hasVariations && variationNameCtrls.isEmpty) {
-            addVariationRow();
-          }
+            if (loadingCats) {
+              loadCats();
+            }
+            if (hasVariations && variationNameCtrls.isEmpty) {
+              addVariationRow();
+            }
 
-          final labelStyle = TextStyle(
-            fontWeight: FontWeight.w600,
-            color: Colors.grey.shade700,
-            fontSize: 12,
-          );
-
-          InputDecoration inputDecoration(String hint) {
-            return InputDecoration(
-              hintText: hint,
-              filled: true,
-              fillColor: Colors.grey.shade50,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 12,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.grey.shade300),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.grey.shade300),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Color(0xFF9F342C)),
-              ),
+            final labelStyle = TextStyle(
+              fontWeight: FontWeight.w600,
+              color: Colors.grey.shade700,
+              fontSize: 12,
             );
-          }
 
-          Widget fieldBlock(String label, Widget child) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: labelStyle),
-                const SizedBox(height: 6),
-                child,
-              ],
-            );
-          }
-
-          Widget colorSquare(Color color) {
-            return Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: Colors.grey.shade300),
-              ),
-              child: Center(
-                child: Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
+            InputDecoration inputDecoration(String hint) {
+              return InputDecoration(
+                hintText: hint,
+                filled: true,
+                fillColor: Colors.grey.shade50,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
                 ),
-              ),
-            );
-          }
-
-          Widget typeOption({
-            required String value,
-            required String label,
-            required Widget leading,
-          }) {
-            final selected = type == value;
-            return InkWell(
-              onTap: () => setState(() => type = value),
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                width: 110,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
+                border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: selected
-                        ? const Color(0xFF9F342C)
-                        : Colors.grey.shade300,
-                    width: selected ? 2 : 1,
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFF9F342C)),
+                ),
+              );
+            }
+
+            Widget fieldBlock(String label, Widget child) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label, style: labelStyle),
+                  const SizedBox(height: 6),
+                  child,
+                ],
+              );
+            }
+
+            Widget colorSquare(Color color) {
+              return Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: Center(
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
-                child: Row(
-                  children: [
-                    leading,
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        label,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey.shade800,
+              );
+            }
+
+            Widget typeOption({
+              required String value,
+              required String label,
+              required Widget leading,
+            }) {
+              final selected = type == value;
+              return InkWell(
+                onTap: () => setState(() => type = value),
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  width: 110,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: selected
+                          ? const Color(0xFF9F342C)
+                          : Colors.grey.shade300,
+                      width: selected ? 2 : 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      leading,
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          label,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.grey.shade800,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-
-          final dialogTitle = nameCtrl.text.trim().isNotEmpty
-              ? "Update Product ${nameCtrl.text.trim()}"
-              : "Update Product";
-
-          return AlertDialog(
-            backgroundColor: Colors.white,
-            surfaceTintColor: Colors.white,
-            insetPadding: const EdgeInsets.symmetric(
-              horizontal: 20,
-              vertical: 24,
-            ),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-            ),
-            titlePadding: const EdgeInsets.fromLTRB(20, 18, 12, 8),
-            contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
-            title: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    dialogTitle,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                    ),
-                    overflow: TextOverflow.ellipsis,
+                    ],
                   ),
                 ),
-                IconButton(
-                  onPressed: () => Navigator.pop(dialogContext),
-                  icon: const Icon(
-                    Icons.close_rounded,
-                    color: Colors.redAccent,
-                  ),
-                ),
-              ],
-            ),
-            content: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: 420,
-                maxHeight: MediaQuery.of(context).size.height * 0.8,
+              );
+            }
+
+            final dialogTitle = nameCtrl.text.trim().isNotEmpty
+                ? "Update Product ${nameCtrl.text.trim()}"
+                : "Update Product";
+
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              insetPadding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 24,
               ),
-              child: loadingCats
-                  ? const Center(child: CircularProgressIndicator())
-                  : SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          fieldBlock(
-                            "Name",
-                            TextField(
-                              controller: nameCtrl,
-                              decoration: inputDecoration("Product name"),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Price",
-                            TextField(
-                              controller: priceCtrl,
-                              keyboardType: TextInputType.number,
-                              decoration: inputDecoration("0"),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Parcel Charge",
-                            TextField(
-                              controller: parcelCtrl,
-                              keyboardType: TextInputType.number,
-                              decoration: inputDecoration("0"),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Menu",
-                            menus.isNotEmpty
-                                ? DropdownButtonFormField<int>(
-                                    value: selectedMenuId,
-                                    decoration: inputDecoration("Select menu"),
-                                    isExpanded: true,
-                                    items: [
-                                      for (final m in menus)
-                                        DropdownMenuItem<int>(
-                                          value: _menuId(m),
-                                          child: Text(_menuName(m)),
-                                        ),
-                                    ],
-                                    onChanged: (val) => setState(() {
-                                      selectedMenuId = val;
-                                    }),
-                                  )
-                                : const Text(
-                                    "No menus available",
-                                    style: TextStyle(color: Colors.red),
-                                  ),
-                          ),
-                          const SizedBox(height: 12),
-                          fieldBlock(
-                            "Category",
-                            categories.isNotEmpty
-                                ? DropdownButtonFormField<int>(
-                                    value: selectedCategoryId,
-                                    decoration: inputDecoration(
-                                      "Select category",
-                                    ),
-                                    isExpanded: true,
-                                    items: [
-                                      for (final c in categories)
-                                        DropdownMenuItem<int>(
-                                          value: _categoryId(c),
-                                          child: Text(_categoryName(c)),
-                                        ),
-                                    ],
-                                    onChanged: (val) => setState(() {
-                                      selectedCategoryId = val;
-                                    }),
-                                  )
-                                : const Text(
-                                    "No categories available",
-                                    style: TextStyle(color: Colors.red),
-                                  ),
-                          ),
-                          const SizedBox(height: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text("Type", style: labelStyle),
-                              const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 10,
-                                runSpacing: 10,
-                                children: [
-                                  typeOption(
-                                    value: "veg",
-                                    label: "Veg",
-                                    leading: colorSquare(Colors.green),
-                                  ),
-                                  typeOption(
-                                    value: "non-veg",
-                                    label: "Non Veg",
-                                    leading: colorSquare(
-                                      const Color(0xFF8D4B2A),
-                                    ),
-                                  ),
-                                  typeOption(
-                                    value: "egg",
-                                    label: "Egg",
-                                    leading: const Icon(
-                                      Icons.egg_alt_outlined,
-                                      size: 18,
-                                      color: Colors.orange,
-                                    ),
-                                  ),
-                                  typeOption(
-                                    value: "drink",
-                                    label: "Drink",
-                                    leading: const Icon(
-                                      Icons.local_drink_outlined,
-                                      size: 18,
-                                      color: Colors.blue,
-                                    ),
-                                  ),
-                                  typeOption(
-                                    value: "others",
-                                    label: "Other",
-                                    leading: const Icon(
-                                      Icons.category_outlined,
-                                      size: 18,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              titlePadding: const EdgeInsets.fromLTRB(20, 18, 12, 8),
+              contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+              title: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      dialogTitle,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      color: Colors.redAccent,
+                    ),
+                  ),
+                ],
+              ),
+              content: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: 420,
+                  maxHeight: MediaQuery.of(context).size.height * 0.8,
+                ),
+                child: loadingCats
+                    ? const Center(child: CircularProgressIndicator())
+                    : SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            fieldBlock(
+                              "Name",
+                              TextField(
+                                controller: nameCtrl,
+                                decoration: inputDecoration("Product name"),
                               ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Switch.adaptive(
-                                value: hasVariations,
-                                onChanged: (val) => setState(() {
-                                  hasVariations = val;
-                                  if (hasVariations &&
-                                      variationNameCtrls.isEmpty) {
-                                    addVariationRow();
-                                  }
-                                }),
-                                activeColor: const Color(0xFF9F342C),
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Price",
+                              TextField(
+                                controller: priceCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: inputDecoration("0"),
                               ),
-                              const SizedBox(width: 8),
-                              Text("Is Variation Product", style: labelStyle),
-                            ],
-                          ),
-                          if (hasVariations) ...[
-                            const SizedBox(height: 10),
-                            Row(
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Parcel Charge",
+                              TextField(
+                                controller: parcelCtrl,
+                                keyboardType: TextInputType.number,
+                                decoration: inputDecoration("0"),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Menu",
+                              menus.isNotEmpty
+                                  ? DropdownButtonFormField<int>(
+                                      value: selectedMenuId,
+                                      decoration:
+                                          inputDecoration("Select menu"),
+                                      isExpanded: true,
+                                      items: [
+                                        for (final m in menus)
+                                          DropdownMenuItem<int>(
+                                            value: _menuId(m),
+                                            child: Text(_menuName(m)),
+                                          ),
+                                      ],
+                                      onChanged: (val) => setState(() {
+                                        selectedMenuId = val;
+                                      }),
+                                    )
+                                  : const Text(
+                                      "No menus available",
+                                      style: TextStyle(color: Colors.red),
+                                    ),
+                            ),
+                            const SizedBox(height: 12),
+                            fieldBlock(
+                              "Category",
+                              categories.isNotEmpty
+                                  ? DropdownButtonFormField<int>(
+                                      value: selectedCategoryId,
+                                      decoration: inputDecoration(
+                                        "Select category",
+                                      ),
+                                      isExpanded: true,
+                                      items: [
+                                        for (final c in categories)
+                                          DropdownMenuItem<int>(
+                                            value: _categoryId(c),
+                                            child: Text(_categoryName(c)),
+                                          ),
+                                      ],
+                                      onChanged: (val) => setState(() {
+                                        selectedCategoryId = val;
+                                      }),
+                                    )
+                                  : const Text(
+                                      "No categories available",
+                                      style: TextStyle(color: Colors.red),
+                                    ),
+                            ),
+                            const SizedBox(height: 12),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text(
-                                  "Variations",
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                                const Spacer(),
-                                TextButton.icon(
-                                  onPressed: () => setState(() {
-                                    addVariationRow();
-                                  }),
-                                  icon: const Icon(Icons.add),
-                                  label: const Text("Add"),
+                                Text("Type", style: labelStyle),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 10,
+                                  runSpacing: 10,
+                                  children: [
+                                    typeOption(
+                                      value: "veg",
+                                      label: "Veg",
+                                      leading: colorSquare(Colors.green),
+                                    ),
+                                    typeOption(
+                                      value: "non-veg",
+                                      label: "Non Veg",
+                                      leading: colorSquare(
+                                        const Color(0xFF8D4B2A),
+                                      ),
+                                    ),
+                                    typeOption(
+                                      value: "egg",
+                                      label: "Egg",
+                                      leading: const Icon(
+                                        Icons.egg_alt_outlined,
+                                        size: 18,
+                                        color: Colors.orange,
+                                      ),
+                                    ),
+                                    typeOption(
+                                      value: "drink",
+                                      label: "Drink",
+                                      leading: const Icon(
+                                        Icons.local_drink_outlined,
+                                        size: 18,
+                                        color: Colors.blue,
+                                      ),
+                                    ),
+                                    typeOption(
+                                      value: "others",
+                                      label: "Other",
+                                      leading: const Icon(
+                                        Icons.category_outlined,
+                                        size: 18,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 6),
-                            Column(
-                              children: List.generate(
-                                variationNameCtrls.length,
-                                (i) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 8),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        flex: 3,
-                                        child: TextField(
-                                          controller: variationNameCtrls[i],
-                                          decoration: const InputDecoration(
-                                            labelText: "Name",
-                                            border: OutlineInputBorder(),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Switch.adaptive(
+                                  value: hasVariations,
+                                  onChanged: (val) => setState(() {
+                                    hasVariations = val;
+                                    if (hasVariations &&
+                                        variationNameCtrls.isEmpty) {
+                                      addVariationRow();
+                                    }
+                                  }),
+                                  activeColor: const Color(0xFF9F342C),
+                                ),
+                                const SizedBox(width: 8),
+                                Text("Is Variation Product", style: labelStyle),
+                              ],
+                            ),
+                            if (hasVariations) ...[
+                              const SizedBox(height: 10),
+                              Row(
+                                children: [
+                                  const Text(
+                                    "Variations",
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  TextButton.icon(
+                                    onPressed: () => setState(() {
+                                      addVariationRow();
+                                    }),
+                                    icon: const Icon(Icons.add),
+                                    label: const Text("Add"),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Column(
+                                children: List.generate(
+                                  variationNameCtrls.length,
+                                  (i) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          flex: 3,
+                                          child: TextField(
+                                            controller: variationNameCtrls[i],
+                                            decoration: const InputDecoration(
+                                              labelText: "Name",
+                                              border: OutlineInputBorder(),
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        flex: 2,
-                                        child: TextField(
-                                          controller: variationPriceCtrls[i],
-                                          keyboardType: TextInputType.number,
-                                          decoration: const InputDecoration(
-                                            labelText: "Price",
-                                            border: OutlineInputBorder(),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          flex: 2,
+                                          child: TextField(
+                                            controller: variationPriceCtrls[i],
+                                            keyboardType: TextInputType.number,
+                                            decoration: const InputDecoration(
+                                              labelText: "Price",
+                                              border: OutlineInputBorder(),
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      IconButton(
-                                        onPressed: () => setState(() {
-                                          variationNameCtrls.removeAt(i);
-                                          variationPriceCtrls.removeAt(i);
-                                        }),
-                                        icon: const Icon(Icons.close_rounded),
-                                      ),
-                                    ],
+                                        IconButton(
+                                          onPressed: () => setState(() {
+                                            variationNameCtrls.removeAt(i);
+                                            variationPriceCtrls.removeAt(i);
+                                            variationIds.removeAt(i);
+                                          }),
+                                          icon: const Icon(Icons.close_rounded),
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          ],
-                          if (error.isNotEmpty) ...[
+                            ],
+                            if (error.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withOpacity(0.08),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: Colors.red.withOpacity(0.2),
+                                  ),
+                                ),
+                                child: Text(
+                                  error,
+                                  style: const TextStyle(
+                                    color: Colors.red,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 12),
-                            Container(
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: Colors.red.withOpacity(0.08),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: Colors.red.withOpacity(0.2),
-                                ),
-                              ),
-                              child: Text(
-                                error,
-                                style: const TextStyle(
-                                  color: Colors.red,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            height: 44,
-                            child: ElevatedButton(
-                              onPressed: saving
-                                  ? null
-                                  : () async {
-                                      final name = nameCtrl.text.trim();
-                                      final price = num.tryParse(
-                                        priceCtrl.text.trim(),
-                                      );
-                                      final parcel = num.tryParse(
-                                        parcelCtrl.text.trim(),
-                                      );
-                                      if (name.isEmpty || price == null) {
-                                        setState(() {
-                                          error = "Enter valid name and price";
-                                        });
-                                        return;
-                                      }
-                                      if (selectedCategoryId == null) {
-                                        setState(() {
-                                          error = "Please select a category";
-                                        });
-                                        return;
-                                      }
-                                      if (selectedMenuId == null) {
-                                        setState(() {
-                                          error = "Please select a menu";
-                                        });
-                                        return;
-                                      }
-                                      final variations =
-                                          <Map<String, dynamic>>[];
-                                      if (hasVariations) {
-                                        for (
-                                          int i = 0;
-                                          i < variationNameCtrls.length;
-                                          i++
-                                        ) {
-                                          final vName = variationNameCtrls[i]
-                                              .text
-                                              .trim();
-                                          final vPrice = num.tryParse(
-                                            variationPriceCtrls[i].text.trim(),
-                                          );
-                                          if (vName.isEmpty || vPrice == null) {
-                                            continue;
+                            SizedBox(
+                                width: double.infinity,
+                                height: 44,
+                                child: ElevatedButton(
+                                  onPressed: saving
+                                      ? null
+                                      : () async {
+                                          final name = nameCtrl.text.trim();
+                                          final price = num.tryParse(
+                                              priceCtrl.text.trim());
+                                          final parcel = num.tryParse(
+                                              parcelCtrl.text.trim());
+
+                                          if (name.isEmpty || price == null) {
+                                            setState(() {
+                                              error =
+                                                  "Enter valid name and price";
+                                            });
+                                            return;
                                           }
-                                          variations.add({
-                                            "variation": vName,
-                                            "price": vPrice,
-                                          });
-                                        }
-                                        if (variations.isEmpty) {
+
+                                          if (selectedCategoryId == null) {
+                                            setState(() {
+                                              error =
+                                                  "Please select a category";
+                                            });
+                                            return;
+                                          }
+
+                                          if (selectedMenuId == null) {
+                                            setState(() {
+                                              error = "Please select a menu";
+                                            });
+                                            return;
+                                          }
+
+                                          final List<Map<String, dynamic>>
+                                              variations = [];
+
+                                          if (hasVariations) {
+                                            for (int i = 0;
+                                                i < variationNameCtrls.length;
+                                                i++) {
+                                              final vName =
+                                                  variationNameCtrls[i]
+                                                      .text
+                                                      .trim();
+                                              final vPrice = num.tryParse(
+                                                  variationPriceCtrls[i]
+                                                      .text
+                                                      .trim());
+
+                                              if (vName.isEmpty ||
+                                                  vPrice == null) continue;
+
+                                              final Map<String, dynamic> v = {
+                                                "variation": vName,
+                                                "price": vPrice,
+                                              };
+
+                                              // ✅ FIXED NULL SAFETY ISSUE HERE
+                                              final id = variationIds[i];
+                                              if (id != null) {
+                                                v["id"] =
+                                                    id; // No more int? error
+                                              }
+
+                                              variations.add(v);
+                                            }
+
+                                            if (variations.isEmpty) {
+                                              setState(() {
+                                                error =
+                                                    "Add at least one variation";
+                                              });
+                                              return;
+                                            }
+                                          }
+
                                           setState(() {
-                                            error =
-                                                "Add at least one variation";
+                                            saving = true;
+                                            error = "";
                                           });
-                                          return;
-                                        }
-                                      }
-                                      setState(() {
-                                        saving = true;
-                                        error = "";
-                                      });
-                                      try {
-                                        final body = {
-                                          "item_name": name,
-                                          "price": price,
-                                          "item_category_id":
-                                              selectedCategoryId,
-                                          "category_id": selectedCategoryId,
-                                          "is_available":
-                                              product["is_available"] ?? 1,
-                                          "type": type,
-                                          "menu_id": selectedMenuId,
-                                        };
-                                        body["take_away_charge"] = parcel ?? 0;
-                                        if (hasVariations) {
-                                          body["has_variations"] = 1;
-                                          body["has_variation"] = 1;
-                                          body["variations"] = variations;
-                                        } else {
-                                          body["has_variations"] = 0;
-                                          body["has_variation"] = 0;
-                                          body["variations"] = [];
-                                        }
-                                        await _attachBranchAndRestaurant(body);
-                                        await AdminApi().updateItem(
-                                          product["id"].toString(),
-                                          body,
-                                        );
-                                        if (!mounted) return;
-                                        Navigator.pop(dialogContext);
-                                        await _loadProducts();
-                                        KioskMemoryService
-                                            .instance
-                                            .mediaRefreshTick
-                                            .value++;
-                                        widget.onProductsUpdated();
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          const SnackBar(
-                                            content: Text(
-                                              "Product updated successfully",
-                                            ),
-                                            backgroundColor: Colors.green,
-                                            duration: Duration(seconds: 1),
-                                          ),
-                                        );
-                                      } catch (e) {
-                                        setState(() {
-                                          error = "Failed to update product";
-                                          saving = false;
-                                        });
-                                      }
-                                    },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF9F342C),
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              child: saving
-                                  ? const SizedBox(
-                                      height: 18,
-                                      width: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : const Text(
-                                      "Update Product",
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
+
+                                          try {
+                                            final itemId = _itemId(product);
+
+                                            if (itemId == null) {
+                                              setState(() {
+                                                error = "Invalid product ID";
+                                                saving = false;
+                                              });
+                                              return;
+                                            }
+
+                                            String? newCategoryName;
+                                            if (selectedCategoryId != null) {
+                                              final found = categories
+                                                  .where(
+                                                    (c) =>
+                                                        _categoryId(c) ==
+                                                        selectedCategoryId,
+                                                  )
+                                                  .toList();
+                                              if (found.isNotEmpty) {
+                                                newCategoryName =
+                                                    _categoryName(found.first);
+                                              }
+                                            }
+
+                                            final Map<String, dynamic> body = {
+                                              "item_name": name,
+                                              "price": price,
+                                              "item_category_id":
+                                                  selectedCategoryId!,
+                                              "category_id":
+                                                  selectedCategoryId!,
+                                              "is_available":
+                                                  product["is_available"] ?? 1,
+                                              "type": type,
+                                              "menu_id": selectedMenuId!,
+                                              "item_id": itemId,
+                                              "id": itemId,
+                                              "take_away_charge": parcel ?? 0,
+                                              "has_variations":
+                                                  hasVariations ? 1 : 0,
+                                              "has_variation":
+                                                  hasVariations ? 1 : 0,
+                                              "variations": hasVariations
+                                                  ? variations
+                                                  : [],
+                                            };
+
+                                            await _attachBranchAndRestaurant(
+                                                body);
+
+                                            await AdminApi().updateItem(
+                                              itemId.toString(),
+                                              body,
+                                            );
+
+                                            if (!mounted) return;
+
+                                            _localOverrides[itemId] = {
+                                              "item_name": name,
+                                              "name": name,
+                                              "price": price,
+                                              "item_price": price,
+                                              "take_away_charge": parcel ?? 0,
+                                              "type": type,
+                                              "menu_id": selectedMenuId,
+                                              "item_category_id":
+                                                  selectedCategoryId,
+                                              "category_id": selectedCategoryId,
+                                              "category_name":
+                                                  newCategoryName ??
+                                                  product["category_name"],
+                                              "has_variations":
+                                                  hasVariations ? 1 : 0,
+                                              "has_variation":
+                                                  hasVariations ? 1 : 0,
+                                              "variations": hasVariations
+                                                  ? variations
+                                                  : [],
+                                            };
+                                            await _persistOverrides();
+
+                                            if (mounted) {
+                                              this.setState(() {
+                                                groupedProducts.forEach((
+                                                  _,
+                                                  list,
+                                                ) {
+                                                  list.removeWhere(
+                                                    (p) =>
+                                                        _itemId(p) == itemId,
+                                                  );
+                                                });
+                                                final updated =
+                                                    <String, dynamic>{
+                                                  ...product,
+                                                  ..._localOverrides[itemId]!,
+                                                  "id": itemId,
+                                                  "item_id": itemId,
+                                                };
+                                                final catKey =
+                                                    (updated["category_name"] ??
+                                                            "Uncategorized")
+                                                        .toString();
+                                                groupedProducts.putIfAbsent(
+                                                  catKey,
+                                                  () => [],
+                                                );
+                                                groupedProducts[catKey]!
+                                                    .add(updated);
+                                                _applySearch();
+                                              });
+                                            }
+
+                                            Navigator.pop(dialogContext);
+
+                                            await _loadProducts();
+
+                                            KioskMemoryService.instance
+                                                .mediaRefreshTick.value++;
+
+                                            widget.onProductsUpdated();
+
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              const SnackBar(
+                                                content: Text(
+                                                    "Product updated successfully"),
+                                                backgroundColor: Colors.green,
+                                                duration: Duration(seconds: 1),
+                                              ),
+                                            );
+                                          } catch (e) {
+                                            setState(() {
+                                              error =
+                                                  "Failed to update product";
+                                              saving = false;
+                                            });
+                                          }
+                                        },
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF9F342C),
+                                    foregroundColor: Colors.white,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
                                     ),
-                            ),
-                          ),
-                        ],
+                                  ),
+                                  child: saving
+                                      ? const SizedBox(
+                                          height: 18,
+                                          width: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : const Text(
+                                          "Update Product",
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.bold),
+                                        ),
+                                )),
+                          ],
+                        ),
                       ),
-                    ),
-            ),
+              ),
             );
           },
         ),
@@ -1450,10 +1805,11 @@ class _ProductsTabState extends State<ProductsTab> {
   }
 
   // ================= UPDATE STATUS =================
-  Future<void> _updateAvailability(int id, bool available) async {
+  Future<void> _updateAvailability(int? id, bool available) async {
+    if (id == null) return;
     setState(() {
       groupedProducts.forEach((_, list) {
-        final idx = list.indexWhere((p) => p["id"] == id);
+        final idx = list.indexWhere((p) => _itemId(p) == id);
         if (idx != -1) list[idx]["is_available"] = available ? 1 : 0;
       });
       _applySearch();
@@ -1576,26 +1932,26 @@ class _ProductsTabState extends State<ProductsTab> {
               child: CircularProgressIndicator(color: Color(0xFF9F342C)),
             )
           : filteredProducts.isEmpty
-          ? _buildEmptyState()
-          : RefreshIndicator(
-              onRefresh: _loadProducts,
-              color: const Color(0xFF9F342C),
-              child: ListView.builder(
-                padding: const EdgeInsets.only(bottom: 100),
-                itemCount: filteredProducts.length,
-                itemBuilder: (context, index) {
-                  String category = filteredProducts.keys.elementAt(index);
-                  List<Map<String, dynamic>> items =
-                      filteredProducts[category]!;
-                  return _categorySection(
-                    category,
-                    items,
-                    crossAxisCount,
-                    aspectRatio,
-                  );
-                },
-              ),
-            ),
+              ? _buildEmptyState()
+              : RefreshIndicator(
+                  onRefresh: _loadProducts,
+                  color: const Color(0xFF9F342C),
+                  child: ListView.builder(
+                    padding: const EdgeInsets.only(bottom: 100),
+                    itemCount: filteredProducts.length,
+                    itemBuilder: (context, index) {
+                      String category = filteredProducts.keys.elementAt(index);
+                      List<Map<String, dynamic>> items =
+                          filteredProducts[category]!;
+                      return _categorySection(
+                        category,
+                        items,
+                        crossAxisCount,
+                        aspectRatio,
+                      );
+                    },
+                  ),
+                ),
     );
   }
 
@@ -1705,14 +2061,12 @@ class _ProductsTabState extends State<ProductsTab> {
                             builder: (context, constraints) {
                               final dpr =
                                   MediaQuery.of(context).devicePixelRatio;
-                              final cacheWidth =
-                                  (constraints.maxWidth * dpr)
-                                      .round()
-                                      .clamp(1, 4096);
-                              final cacheHeight =
-                                  (constraints.maxHeight * dpr)
-                                      .round()
-                                      .clamp(1, 4096);
+                              final cacheWidth = (constraints.maxWidth * dpr)
+                                  .round()
+                                  .clamp(1, 4096);
+                              final cacheHeight = (constraints.maxHeight * dpr)
+                                  .round()
+                                  .clamp(1, 4096);
                               return Image.network(
                                 imageUrl,
                                 fit: BoxFit.cover,
@@ -1773,7 +2127,7 @@ class _ProductsTabState extends State<ProductsTab> {
                         children: [
                           Expanded(
                             child: Text(
-                              p["item_name"] ?? "-",
+                              _displayName(p).isEmpty ? "-" : _displayName(p),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
@@ -1842,7 +2196,7 @@ class _ProductsTabState extends State<ProductsTab> {
                             value: isActive,
                             activeColor: const Color.fromARGB(255, 63, 159, 44),
                             onChanged: (val) =>
-                                _updateAvailability(p["id"], val),
+                                _updateAvailability(_itemId(p), val),
                           ),
                         ),
                       ),

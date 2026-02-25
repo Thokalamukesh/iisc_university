@@ -2,6 +2,7 @@ import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/order_utils.dart';
+import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:api_selfxo_project/printer/epson_usb_printer_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
 import 'package:flutter/material.dart';
@@ -50,10 +51,13 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       final savedName = prefs.getString("kiosk_name");
       final res = await AdminApi().getSettings();
       final data = res.data ?? {};
-      final settings =
-          (data["settings"] as Map?)?.cast<String, dynamic>() ?? {};
-      final restaurant =
-          (data["restaurant"] as Map?)?.cast<String, dynamic>() ?? {};
+        final settings =
+            (data["settings"] as Map?)?.cast<String, dynamic>() ?? {};
+        final restaurant =
+            (data["restaurant"] as Map?)?.cast<String, dynamic>() ?? {};
+
+        await ReceiptPrintMode.storeFromMap(settings);
+        await ReceiptPrintMode.storeFromMap(restaurant);
 
       if (!mounted) return;
       setState(() {
@@ -79,6 +83,9 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
         final kioskSettings = (raw["kiosk_settings"] as Map?)
             ?.cast<String, dynamic>();
         final branch = (raw["branch"] as Map?)?.cast<String, dynamic>();
+
+        await ReceiptPrintMode.storeFromMap(kioskSettings);
+        await ReceiptPrintMode.storeFromMap(restaurant);
 
         final mergedSettings = <String, dynamic>{};
         if (kioskSettings != null) {

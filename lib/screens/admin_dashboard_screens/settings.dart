@@ -2,6 +2,7 @@ import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/logout_helper.dart';
 import 'package:api_selfxo_project/printer/epson_usb_printer_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
+import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/core/order_utils.dart';
 import 'package:flutter/material.dart';
@@ -139,6 +140,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           (data["settings"] as Map?)?.cast<String, dynamic>() ?? {};
       final restaurant =
           (data["restaurant"] as Map?)?.cast<String, dynamic>() ?? {};
+
+      await ReceiptPrintMode.storeFromMap(settings);
+      await ReceiptPrintMode.storeFromMap(restaurant);
 
       if (!mounted) return;
       setState(() {

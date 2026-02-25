@@ -22,6 +22,7 @@ class PaymentSuccessDialog extends StatefulWidget {
   final String? restaurantName;
   final String? transactionId;
   final DateTime? orderDate;
+  final String? orderType;
 
   const PaymentSuccessDialog({
     super.key,
@@ -31,6 +32,7 @@ class PaymentSuccessDialog extends StatefulWidget {
     this.restaurantName,
     this.transactionId,
     this.orderDate,
+    this.orderType,
   });
 
   @override
@@ -216,6 +218,8 @@ class _PaymentSuccessDialogState extends State<PaymentSuccessDialog>
         paymentMode: "PAID",
         transactionId: transactionId,
         orderDate: orderDate,
+        orderType: widget.orderType,
+        removeTaxLines: true,
       );
 
       if (!mounted) return;

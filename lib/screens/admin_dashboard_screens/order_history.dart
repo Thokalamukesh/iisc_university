@@ -638,6 +638,8 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
     final taxId = _extractTaxId(rawData);
     final taxAmount = _extractTaxAmount(rawData);
     final discountAmount = _extractDiscountAmount(rawData);
+    final orderTypeLabel = _getOrderType(rawData);
+    final parcelTotal = _extractParcelTotal(rawData, finalItems);
 
     try {
       await _printerService.printOrder(
@@ -651,11 +653,62 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
         paymentMode: paymentMode,
         taxAmount: taxAmount,
         discountAmount: discountAmount,
+        orderType: orderTypeLabel,
+        removeTaxLines: true,
+        parcelTotalOverride: parcelTotal,
       );
       _showSnack("Print started", Colors.green);
     } catch (e) {
       _showSnack("Print failed", Colors.red);
     }
+  }
+
+  num _extractParcelTotal(
+    dynamic data,
+    List<Map<String, dynamic>> items,
+  ) {
+    num total = 0;
+    bool found = false;
+    for (final item in items) {
+      final qty = item["qty"] is num ? item["qty"] as num : 1;
+      final charge =
+          item["take_away_charge"] ??
+          item["takeaway_charge"] ??
+          item["parcel_charge"] ??
+          item["parcelCharge"] ??
+          item["parcel_amount"] ??
+          item["parcelAmount"];
+      final num c = charge is num ? charge : num.tryParse("$charge") ?? 0;
+      if (c > 0) {
+        total += c * qty;
+        found = true;
+      }
+    }
+    if (found) return total;
+
+    Map? order;
+    if (data is Map) {
+      final dynamic raw =
+          data["order"] ?? data["data"]?["order"] ?? data["data"] ?? data;
+      if (raw is Map) order = raw;
+    }
+    if (order == null) return 0;
+    const keys = [
+      "take_away_charge",
+      "takeaway_charge",
+      "parcel_charge",
+      "parcel_charges",
+      "parcel_amount",
+      "parcel_total",
+      "parcelTotal",
+      "take_away_charge_total",
+    ];
+    for (final key in keys) {
+      final v = order?[key];
+      final num value = v is num ? v : num.tryParse("$v") ?? 0;
+      if (value > 0) return value;
+    }
+    return 0;
   }
 
   void _showSnack(String text, Color color) {
