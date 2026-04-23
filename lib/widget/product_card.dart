@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:api_selfxo_project/core/image_url.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 
 class ProductCardRef extends StatefulWidget {
   final int id;
@@ -136,6 +139,8 @@ class _ProductCardRefState extends State<ProductCardRef> {
 
   @override
   Widget build(BuildContext context) {
+    final bool isTablet = MediaQuery.of(context).size.width > 600;
+    final bool isCompactWebCard = kIsWeb && !isTablet;
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -151,13 +156,21 @@ class _ProductCardRefState extends State<ProductCardRef> {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(14),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize: MainAxisSize.max,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            AspectRatio(aspectRatio: 1.2, child: _imageSection()),
-            _infoSection(),
+            AspectRatio(
+              aspectRatio: isCompactWebCard ? 1.42 : 1.2,
+              child: _imageSection(),
+            ),
+            Expanded(child: _infoSection()),
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+              padding: EdgeInsets.fromLTRB(
+                isCompactWebCard ? 8 : 10,
+                0,
+                isCompactWebCard ? 8 : 10,
+                isCompactWebCard ? 6 : 8,
+              ),
               child: qty == 0 ? _addButton() : _counter(),
             ),
           ],
@@ -170,6 +183,7 @@ class _ProductCardRefState extends State<ProductCardRef> {
     final dpr = MediaQuery.of(context).devicePixelRatio;
     final cacheWidth = widget.imageCacheWidth ?? (220 * dpr).round();
     final cacheHeight = widget.imageCacheHeight ?? (220 * dpr).round();
+    final imageUrl = normalizeImageUrl(widget.imagePath);
 
     return Builder(
       builder: (ctx) {
@@ -180,17 +194,17 @@ class _ProductCardRefState extends State<ProductCardRef> {
               child: Container(
                 key: ValueKey("product-image-${widget.id}"),
                 color: Colors.grey.shade100,
-                child: widget.imagePath.isNotEmpty
-                    ? Image.network(
-                        widget.imagePath,
+                child: imageUrl.isNotEmpty
+                    ? AppNetworkImage(
+                        url: imageUrl,
                         fit: BoxFit.cover,
                         alignment: Alignment.center,
-                        filterQuality: FilterQuality.low,
                         gaplessPlayback: true,
                         cacheWidth: cacheWidth,
                         cacheHeight: cacheHeight,
-                        errorBuilder: (_, __, ___) =>
-                            const Center(child: Icon(Icons.fastfood, size: 30)),
+                        fallback: const Center(
+                          child: Icon(Icons.fastfood, size: 30),
+                        ),
                       )
                     : const Center(child: Icon(Icons.fastfood, size: 30)),
               ),
@@ -223,11 +237,16 @@ class _ProductCardRefState extends State<ProductCardRef> {
 
   Widget _infoSection() {
     final isTablet = MediaQuery.of(context).size.width > 600;
+    final isCompactWebCard = kIsWeb && !isTablet;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      padding: EdgeInsets.symmetric(
+        horizontal: isCompactWebCard ? 8 : 10,
+        vertical: isCompactWebCard ? 1 : 2,
+      ),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.max,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Text(
@@ -236,35 +255,46 @@ class _ProductCardRefState extends State<ProductCardRef> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: isTablet ? 16 : 13,
+              fontSize: isTablet ? 16 : (isCompactWebCard ? 12 : 13),
               fontWeight: FontWeight.w600,
+              height: isCompactWebCard ? 1.1 : null,
             ),
           ),
           Text(
             "₹${widget.price}",
             textAlign: TextAlign.center,
+            maxLines: 1,
             style: TextStyle(
-              fontSize: isTablet ? 16 : 14,
+              fontSize: isTablet ? 16 : (isCompactWebCard ? 13 : 14),
               fontWeight: FontWeight.bold,
               color: const Color.fromARGB(255, 0, 0, 0),
+              height: isCompactWebCard ? 1.05 : null,
             ),
           ),
           if (_needsCustomization)
-            const Text(
+            Text(
               "Variants Available",
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 10, color: Colors.orange, height: 1.0),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: isCompactWebCard ? 8.5 : 10,
+                color: Colors.orange,
+                height: 1.0,
+              ),
             )
           else
-            SizedBox(height: isTablet ? 12 : 2),
+            SizedBox(height: isTablet ? 12 : (isCompactWebCard ? 0 : 2)),
         ],
       ),
     );
   }
 
   Widget _addButton() {
+    final bool isTablet = MediaQuery.of(context).size.width > 600;
+    final bool isCompactWebCard = kIsWeb && !isTablet;
     return SizedBox(
-      height: 32, // Slightly reduced for mobile fit
+      height: isCompactWebCard ? 28 : 32,
       child: OutlinedButton(
         style: OutlinedButton.styleFrom(
           backgroundColor: const Color(0xFFF4C66A),
@@ -275,17 +305,21 @@ class _ProductCardRefState extends State<ProductCardRef> {
         ),
         onPressed: () =>
             _needsCustomization ? _openCustomizationSheet() : _addDirect(),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.add, size: 18, color: Color(0xFF1F1F1F)),
-            SizedBox(width: 6),
+            Icon(
+              Icons.add,
+              size: isCompactWebCard ? 15 : 18,
+              color: const Color(0xFF1F1F1F),
+            ),
+            SizedBox(width: isCompactWebCard ? 4 : 6),
             Text(
               "Add",
               style: TextStyle(
                 fontWeight: FontWeight.w800,
-                color: Color(0xFF1F1F1F),
-                fontSize: 14,
+                color: const Color(0xFF1F1F1F),
+                fontSize: isCompactWebCard ? 12 : 14,
               ),
             ),
           ],
@@ -296,7 +330,8 @@ class _ProductCardRefState extends State<ProductCardRef> {
 
   Widget _counter() {
     final bool isTablet = MediaQuery.of(context).size.width > 600;
-    const double buttonHeight = 32;
+    final bool isCompactWebCard = kIsWeb && !isTablet;
+    final double buttonHeight = isCompactWebCard ? 28 : 32;
     return SizedBox(
       height: buttonHeight,
       width: double.infinity,
@@ -326,7 +361,7 @@ class _ProductCardRefState extends State<ProductCardRef> {
                 child: Text(
                   "$qty",
                   style: TextStyle(
-                    fontSize: isTablet ? 16 : 14,
+                    fontSize: isTablet ? 16 : (isCompactWebCard ? 12 : 14),
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -372,7 +407,7 @@ class _ProductCardRefState extends State<ProductCardRef> {
           label,
           style: TextStyle(
             color: isPrimary ? Colors.white : (textColor ?? Colors.black87),
-            fontSize: isTablet ? 18 : 16,
+            fontSize: isTablet ? 18 : (kIsWeb ? 14 : 16),
             fontWeight: FontWeight.bold,
           ),
         ),
@@ -612,20 +647,23 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
   Widget _buildHeader() {
     final dpr = MediaQuery.of(context).devicePixelRatio;
     final int cache = (80 * dpr).round().clamp(1, 512);
+    final imageUrl = normalizeImageUrl(widget.imageUrl);
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         ClipRRect(
           borderRadius: BorderRadius.circular(14),
-          child: Image.network(
-            widget.imageUrl,
-            width: 80, // Slightly smaller for header
-            height: 80,
-            fit: BoxFit.cover,
-            cacheWidth: cache,
-            cacheHeight: cache,
-            errorBuilder: (_, __, ___) => const Icon(Icons.fastfood, size: 50),
-          ),
+          child: imageUrl.isNotEmpty
+              ? AppNetworkImage(
+                  url: imageUrl,
+                  width: 80, // Slightly smaller for header
+                  height: 80,
+                  fit: BoxFit.cover,
+                  cacheWidth: cache,
+                  cacheHeight: cache,
+                  fallback: const Icon(Icons.fastfood, size: 50),
+                )
+              : const Icon(Icons.fastfood, size: 50),
         ),
         const SizedBox(width: 12),
         Expanded(

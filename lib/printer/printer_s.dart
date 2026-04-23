@@ -55,7 +55,8 @@ class PrinterService {
     num parcelTotal,
   ) {
     if (parcelTotal <= 0 || _hasParcelLine(printObject)) return printObject;
-    final line = "Parcel Charges".padRight(22) + "Rs ${parcelTotal.toStringAsFixed(2)}";
+    final line =
+        "Parcel Charges".padRight(22) + "Rs ${parcelTotal.toStringAsFixed(2)}";
     final entry = {
       'type': 'text',
       'text': line,
@@ -177,27 +178,27 @@ class PrinterService {
       throw Exception("Test print not supported for LAN printer");
     }
 
-    final demoCart = <Map<String, dynamic>>[
-      {
-        "name": "Test Item",
-        "qty": 1,
-        "price": 1,
-        "take_away_charge": 1,
-        "category": "TEST",
-      },
-    ];
+    if (type == PrinterType.internal) {
+      await _sunmiTestPrint(restaurantName);
+      return;
+    }
 
-    await printOrder(
-      orderId: 0,
-      cartItems: demoCart,
-      restaurantName: restaurantName,
-      address: address,
-      paymentMode: "TEST",
-      transactionId: "TEST",
-      orderDate: DateTime.now(),
-      orderType: "Take Away",
-      forceLocal: true,
-    );
+    if (type == PrinterType.usb) {
+      final printer = await _resolveUsbPrinter(allowAutoSelect: true);
+      if (printer == null) {
+        throw Exception("No USB printer selected");
+      }
+      final sample = _usbService.samplePrintObject(
+        restaurantName: restaurantName,
+        address: address ?? "SELFX Kiosk",
+      );
+      await _usbService.printData(
+        printer: printer,
+        printObject: sample,
+        lineFeed: 0,
+      );
+      return;
+    }
   }
 
   // ================= RECEIPT PRINT =================
@@ -220,7 +221,17 @@ class PrinterService {
     bool removeTaxLines = false,
     num? parcelTotalOverride,
   }) async {
+    if (kIsWeb) {
+      if (orderId > 0) {
+        await KioskApi().printReceipt(orderId);
+      }
+      return;
+    }
+
     final type = await _getPrinterType();
+    if (type == null) {
+      throw Exception("Printer type is not configured");
+    }
     final receiptMode = await ReceiptPrintMode.getStoredMode();
     final bool shouldForceLocal = forceLocal;
     final num parcelTotal =
@@ -255,8 +266,9 @@ class PrinterService {
             printObjects = printObjects.map(_removeTaxLines).toList();
           }
           if (parcelTotal > 0) {
-            printObjects =
-                printObjects.map((p) => _injectParcelLine(p, parcelTotal)).toList();
+            printObjects = printObjects
+                .map((p) => _injectParcelLine(p, parcelTotal))
+                .toList();
           }
           if (printObjects.isNotEmpty) {
             for (final obj in printObjects) {
@@ -293,7 +305,9 @@ class PrinterService {
     // ================= USB PRINTER =================
     if (type == PrinterType.usb) {
       final printer = await _resolveUsbPrinter(allowAutoSelect: true);
-      if (printer == null) return;
+      if (printer == null) {
+        throw Exception("No USB printer selected");
+      }
 
       // ---- Prefer backend (Angular behavior) ----
       if (!shouldForceLocal && orderId > 0) {
@@ -324,17 +338,25 @@ class PrinterService {
             printObjects = printObjects.map(_removeTaxLines).toList();
           }
           if (parcelTotal > 0) {
-            printObjects =
-                printObjects.map((p) => _injectParcelLine(p, parcelTotal)).toList();
+            printObjects = printObjects
+                .map((p) => _injectParcelLine(p, parcelTotal))
+                .toList();
           }
           if (printObjects.isNotEmpty) {
+            var printedBackendObject = false;
             for (final obj in printObjects) {
+              final usbObject = _prepareBackendPrintObjectForUsb(
+                obj,
+                removeTaxLines: removeTaxLines,
+              );
+              if (!_hasPrintableText(usbObject)) continue;
               await _usbService.printRawPrintObject(
                 printer: printer,
-                printObject: obj,
+                printObject: usbObject,
               );
+              printedBackendObject = true;
             }
-            return;
+            if (printedBackendObject) return;
           }
         } catch (e) {
           // Silent fallback to local builder
@@ -402,7 +424,9 @@ class PrinterService {
 
     if (type == PrinterType.usb) {
       final printer = await _resolveUsbPrinter(allowAutoSelect: true);
-      if (printer == null) return;
+      if (printer == null) {
+        throw Exception("No USB printer selected");
+      }
 
       final usbData = receiptData.map(_mapForUsb).toList();
 
@@ -602,6 +626,53 @@ class PrinterService {
         'heightTimes': options['size'] == 'lg' ? 1 : 0,
       },
     };
+  }
+
+  List<dynamic> _prepareBackendPrintObjectForUsb(
+    List<dynamic> printObject, {
+    required bool removeTaxLines,
+  }) {
+    var prepared = _sanitizePrintObject(printObject);
+    if (removeTaxLines) {
+      prepared = _removeTaxLines(prepared);
+    }
+    return prepared.map((entry) {
+      if (entry is! Map) return entry;
+      final mapped = Map<String, dynamic>.from(entry);
+      if (mapped['type'] != 'text') return mapped;
+
+      final rawOptions = mapped['options'];
+      final options = rawOptions is Map
+          ? Map<String, dynamic>.from(rawOptions)
+          : <String, dynamic>{};
+      final size = options['size']?.toString();
+      mapped['options'] = {
+        'align': _toInt(options['align']) ?? 0,
+        'nLan': _toInt(options['nLan']) ?? 0,
+        'nOrgx': _toInt(options['nOrgx']) ?? 0,
+        'fontType': _toInt(options['fontType']) ?? 0,
+        'fontStyle':
+            (_toInt(options['fontStyle']) ?? 0) > 0 || options['bold'] == true
+                ? 1
+                : 0,
+        'widthTimes':
+            (_toInt(options['widthTimes']) ?? 0) > 0 || size == 'lg' ? 1 : 0,
+        'heightTimes':
+            (_toInt(options['heightTimes']) ?? 0) > 0 || size == 'lg' ? 1 : 0,
+      };
+      mapped['text'] = mapped['text']?.toString() ?? '';
+      return mapped;
+    }).toList();
+  }
+
+  bool _hasPrintableText(List<dynamic> printObject) {
+    for (final entry in printObject) {
+      if (entry is Map && entry['type'] == 'text') {
+        final text = entry['text']?.toString().trim() ?? '';
+        if (text.isNotEmpty) return true;
+      }
+    }
+    return false;
   }
 
   Future<Map<String, dynamic>?> _getSelectedUsbPrinter() async {
@@ -1562,8 +1633,6 @@ class PrinterService {
 
     return result;
   }
-
-  
 
   dynamic _sanitizeNullTokens(dynamic value) {
     if (value is String) {

@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
+import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'home_page2.dart';
 import 'cart_page.dart';
@@ -79,8 +80,7 @@ class _MainNavigationState extends State<MainNavigation>
         final nested = item["item"];
         final nestedMap =
             nested is Map ? Map<String, dynamic>.from(nested) : null;
-        final rawCharge =
-            _readKey(
+        final rawCharge = _readKey(
               item,
               [
                 "take_away_charge",
@@ -159,9 +159,8 @@ class _MainNavigationState extends State<MainNavigation>
     final List<Map<String, dynamic>> list = [];
     final Set<int> seen = {};
 
-    final products = apiProducts
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
+    final products =
+        apiProducts.map((e) => Map<String, dynamic>.from(e)).toList();
 
     for (final category in products) {
       final catActiveRaw = category["is_active"];
@@ -179,8 +178,7 @@ class _MainNavigationState extends State<MainNavigation>
         );
         final nestedMap =
             nested is Map ? Map<String, dynamic>.from(nested) : null;
-        final avail =
-            _readKey(
+        final avail = _readKey(
               item,
               ["is_available", "isAvailable", "available", "isAvailableNow"],
             ) ??
@@ -190,8 +188,7 @@ class _MainNavigationState extends State<MainNavigation>
             );
         final bool isAvailable = avail == null || isTruthy(avail);
         if (!isAvailable) continue;
-        final rec =
-            _readKey(
+        final rec = _readKey(
               item,
               [
                 "is_recommended",
@@ -219,28 +216,26 @@ class _MainNavigationState extends State<MainNavigation>
 
         final List<Map<String, dynamic>> variations =
             (item["variations"] as List?)
-                ?.map((e) => Map<String, dynamic>.from(e))
-                .toList() ??
-            [];
+                    ?.map((e) => Map<String, dynamic>.from(e))
+                    .toList() ??
+                [];
 
         final rawModifiers = item["modifiers"];
         final List<Map<String, dynamic>> modifiers =
             rawModifiers is Map && rawModifiers["options"] is List
-            ? (rawModifiers["options"] as List)
-                  .map((e) => Map<String, dynamic>.from(e))
-                  .toList()
-            : [];
+                ? (rawModifiers["options"] as List)
+                    .map((e) => Map<String, dynamic>.from(e))
+                    .toList()
+                : [];
 
-        final image =
-            item["item_photo_url"] ??
+        final image = item["item_photo_url"] ??
             item["image"] ??
             item["photo_url"] ??
             nestedMap?["item_photo_url"] ??
             nestedMap?["image"] ??
             nestedMap?["photo_url"] ??
             "";
-        final name =
-            item["item_name"] ??
+        final name = item["item_name"] ??
             item["name"] ??
             nestedMap?["item_name"] ??
             nestedMap?["name"] ??
@@ -258,7 +253,7 @@ class _MainNavigationState extends State<MainNavigation>
                 nestedMap?["item_price"] ??
                 0,
           ),
-          "image": image,
+          "image": normalizeImageUrlValue(image),
           "category": catName,
           "variations": variations,
           "variation": defaultVariation,
@@ -272,8 +267,7 @@ class _MainNavigationState extends State<MainNavigation>
   int getQtyForProduct(int productId) {
     return cart.fold<int>(
       0,
-      (sum, item) =>
-          sum + (item["id"] == productId ? _asInt(item["qty"]) : 0),
+      (sum, item) => sum + (item["id"] == productId ? _asInt(item["qty"]) : 0),
     );
   }
 
@@ -423,8 +417,7 @@ class _MainNavigationState extends State<MainNavigation>
 
     final totalForProduct = cart.fold<int>(
       0,
-      (sum, item) =>
-          sum + (item["id"] == id ? _asInt(item["qty"]) : 0),
+      (sum, item) => sum + (item["id"] == id ? _asInt(item["qty"]) : 0),
     );
     final delta = qty - totalForProduct;
 
@@ -453,7 +446,7 @@ class _MainNavigationState extends State<MainNavigation>
       } else {
         final anyIdx = cart.lastIndexWhere((c) => c["id"] == id);
         if (anyIdx != -1) {
-        final newEntryQty = _asInt(cart[anyIdx]["qty"]) + delta;
+          final newEntryQty = _asInt(cart[anyIdx]["qty"]) + delta;
           if (newEntryQty <= 0) {
             cart.removeAt(anyIdx);
           } else {
@@ -672,7 +665,8 @@ class _MainNavigationState extends State<MainNavigation>
     required String imageUrl,
   }) {
     if (!mounted) return;
-    if (imageUrl.trim().isEmpty) {
+    final normalizedImageUrl = normalizeImageUrl(imageUrl);
+    if (normalizedImageUrl.isEmpty) {
       _finishFlyAnimation(force: true);
       return;
     }
@@ -726,7 +720,7 @@ class _MainNavigationState extends State<MainNavigation>
               child: Opacity(
                 opacity: opacity,
                 child: Image.network(
-                  imageUrl,
+                  normalizedImageUrl,
                   width: size,
                   height: size,
                   cacheWidth: cacheSize,
@@ -748,7 +742,8 @@ class _MainNavigationState extends State<MainNavigation>
     }
     overlay.insert(_overlayEntry!);
 
-    final duration = _flyController!.duration ?? const Duration(milliseconds: 900);
+    final duration =
+        _flyController!.duration ?? const Duration(milliseconds: 900);
     _flyTimeoutTimer?.cancel();
     _flyTimeoutTimer = Timer(duration + const Duration(milliseconds: 400), () {
       if (!mounted) return;
@@ -801,30 +796,29 @@ class _MainNavigationState extends State<MainNavigation>
                   onClearCart: _clearAllPopup,
                   onCartIconRect: (rect) => _cartIconRect = rect,
                   isActive: currentIndex == 0,
-                  onAddToCart:
-                      (
-                        int id,
-                        String name,
-                        String category,
-                        int price,
-                        String image,
-                        int qty,
-                        Map<String, dynamic>? variation,
-                        List<Map<String, dynamic>> modifiers,
-                        Rect? imageRect,
-                      ) {
-                        _handleAddToCart(
-                          id,
-                          name,
-                          category,
-                          price,
-                          image,
-                          qty,
-                          variation,
-                          modifiers,
-                          imageRect,
-                        );
-                      },
+                  onAddToCart: (
+                    int id,
+                    String name,
+                    String category,
+                    int price,
+                    String image,
+                    int qty,
+                    Map<String, dynamic>? variation,
+                    List<Map<String, dynamic>> modifiers,
+                    Rect? imageRect,
+                  ) {
+                    _handleAddToCart(
+                      id,
+                      name,
+                      category,
+                      price,
+                      image,
+                      qty,
+                      variation,
+                      modifiers,
+                      imageRect,
+                    );
+                  },
                   onProductsLoaded: (List<dynamic> p1) {
                     setState(
                       () {
@@ -837,7 +831,6 @@ class _MainNavigationState extends State<MainNavigation>
                   getQtyForProduct: getQtyForProduct,
                   cart: cart, // ✅ Passed current cart
                 ),
-
                 CartPage(
                   cart: cart,
                   recommendedProducts: recommendedProducts,
@@ -1024,7 +1017,7 @@ class _MainNavigationState extends State<MainNavigation>
                                     }
                                     final rect =
                                         render.localToGlobal(Offset.zero) &
-                                        render.size;
+                                            render.size;
                                     _cartIconRect = rect;
                                   },
                                 );
@@ -1141,8 +1134,7 @@ class _MainNavigationState extends State<MainNavigation>
       final int variationPrice = item["variation"]?["price"] ?? 0;
 
       // modifiers total price (safe)
-      final int modifiersPrice =
-          (item["modifiers"] as List?)?.fold<int>(
+      final int modifiersPrice = (item["modifiers"] as List?)?.fold<int>(
             0,
             (sum, m) => sum + ((m["price"] ?? 0) as int),
           ) ??

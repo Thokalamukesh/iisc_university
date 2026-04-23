@@ -1,6 +1,9 @@
 import 'package:dio/dio.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dio_client.dart';
+import 'web_api_config.dart';
 
 class KioskApi {
   // =========================================================
@@ -9,6 +12,88 @@ class KioskApi {
   Future<Response> getRestaurantData() async {
     final dio = await DioClient.getAuthedDio();
     return dio.get("kiosks/getRestaurantData");
+  }
+
+  Future<List<Map<String, dynamic>>> getAllRestaurantsWeb() async {
+    if (!kIsWeb) return const [];
+
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 12),
+        receiveTimeout: const Duration(seconds: 18),
+        sendTimeout: null,
+        headers: const {
+          "Accept": "application/json",
+        },
+        validateStatus: (status) => status != null && status < 500,
+      ),
+    );
+
+    final configuredUrl = WebApiConfig.allRestaurantsUrl;
+    kioskLog(
+      'Loading web restaurants from $configuredUrl',
+      tag: 'WEB_RESTAURANTS',
+    );
+    final initial = await dio.get(configuredUrl);
+
+    final direct = _extractRestaurantList(initial.data);
+    if (direct.isNotEmpty) {
+      kioskLog(
+        'Loaded ${direct.length} restaurants directly from JSON',
+        tag: 'WEB_RESTAURANTS',
+      );
+      return direct;
+    }
+
+    final fallbackUrl = _deriveRestaurantApiUrl(
+      configuredUrl: configuredUrl,
+      responseData: initial.data,
+    );
+    if (fallbackUrl == null || fallbackUrl == configuredUrl) return const [];
+
+    kioskLog(
+      'Falling back to restaurant API $fallbackUrl',
+      tag: 'WEB_RESTAURANTS',
+    );
+    final fallback = await dio.get(fallbackUrl);
+    final list = _extractRestaurantList(fallback.data);
+    kioskLog(
+      'Loaded ${list.length} restaurants from fallback JSON',
+      tag: 'WEB_RESTAURANTS',
+    );
+    return list;
+  }
+
+  List<Map<String, dynamic>> _extractRestaurantList(dynamic raw) {
+    final rawList = raw is List
+        ? raw
+        : raw is Map
+        ? (raw["data"] ?? raw["restaurants"] ?? raw["items"])
+        : null;
+    if (rawList is! List) return const [];
+
+    return rawList
+        .whereType<Map>()
+        .map((item) => item.map((key, value) => MapEntry("$key", value)))
+        .toList();
+  }
+
+  String? _deriveRestaurantApiUrl({
+    required String configuredUrl,
+    required dynamic responseData,
+  }) {
+    final configuredUri = Uri.tryParse(configuredUrl);
+    if (configuredUri == null || responseData is! String) return null;
+
+    final html = responseData;
+    final match = RegExp(
+      r"""fetch\(\s*['"]([^'"]+)['"]\s*\)""",
+      caseSensitive: false,
+    ).firstMatch(html);
+    final path = match?.group(1)?.trim();
+    if (path == null || path.isEmpty) return null;
+
+    return configuredUri.resolve(path).toString();
   }
 
   // =========================================================

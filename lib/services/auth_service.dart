@@ -1,15 +1,22 @@
+import 'dart:async';
+
 import 'package:api_selfxo_project/api/dio_client.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/core/device_info.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class AuthService {
-  static const bool _enableAuthLogs = false;
+  static const bool _enableAuthLogs = true;
+  static const Duration _tokenPollInterval = Duration(seconds: 3);
+  static const Duration _webTokenPollInterval = Duration(milliseconds: 700);
+  static const Duration _tokenPollTimeout = Duration(minutes: 1);
+  static const Duration _webTokenPollTimeout = Duration(seconds: 12);
 
   void _log(String message) {
     if (_enableAuthLogs) {
+      kioskLog(message, tag: 'AUTH');
     }
   }
 
@@ -55,10 +62,31 @@ class AuthService {
           },
         );
 
+        final status = res.statusCode ?? 0;
+        final responseBody = res.data?.toString() ?? "";
+        final responseBodyLower = responseBody.toLowerCase();
+        final bool looksDuplicate = responseBodyLower.contains("duplicate") ||
+            responseBodyLower.contains("already exists") ||
+            responseBodyLower.contains("already taken") ||
+            responseBodyLower.contains("device id") ||
+            responseBodyLower.contains("device_id") ||
+            responseBodyLower.contains("kiosks_device_id_unique") ||
+            status == 409 ||
+            status == 422;
+
+        if (status >= 400) {
+          if (looksDuplicate) {
+            _log("⚠️ Device already exists → fetching token");
+            return await _waitForExistingToken(deviceId);
+          }
+          _log("❌ Register failed with status $status: $responseBody");
+          return false;
+        }
+
         final token = res.data?["token"];
         if (token == null || token.toString().isEmpty) {
           _log("❌ Token missing in register response");
-          return false;
+          return await _waitForExistingToken(deviceId);
         }
 
         await prefs.setString("auth_token", token.toString());
@@ -69,9 +97,7 @@ class AuthService {
         final msgRaw = e.response?.data?.toString() ?? e.message ?? "";
         final msg = msgRaw.toLowerCase();
 
-
-        final bool looksDuplicate =
-            msg.contains("duplicate") ||
+        final bool looksDuplicate = msg.contains("duplicate") ||
             msg.contains("already exists") ||
             msg.contains("already taken") ||
             msg.contains("device id") ||
@@ -82,7 +108,13 @@ class AuthService {
 
         if (looksDuplicate) {
           _log("⚠️ Device already exists → fetching token");
-          return await _fetchExistingToken(deviceId);
+          return await _waitForExistingToken(deviceId);
+        }
+
+        final recovered = await _waitForExistingToken(deviceId);
+        if (recovered) {
+          _log("✅ Recovered kiosk token after register error");
+          return true;
         }
 
         _log("❌ Register failed: ${e.response?.data}");
@@ -100,6 +132,11 @@ class AuthService {
       final dio = DioClient.getDio();
 
       final res = await dio.get("kiosks/getToken/$deviceId");
+      final status = res.statusCode ?? 0;
+      if (status >= 400) {
+        _log("❌ Failed to fetch existing token: HTTP $status");
+        return false;
+      }
       final token = res.data?["token"];
 
       if (token == null || token.toString().isEmpty) {
@@ -114,5 +151,17 @@ class AuthService {
       _log("❌ TOKEN FETCH ERROR: $e");
       return false;
     }
+  }
+
+  Future<bool> _waitForExistingToken(String deviceId) async {
+    const timeout = kIsWeb ? _webTokenPollTimeout : _tokenPollTimeout;
+    const pollInterval = kIsWeb ? _webTokenPollInterval : _tokenPollInterval;
+    final endAt = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(endAt)) {
+      final ok = await _fetchExistingToken(deviceId);
+      if (ok) return true;
+      await Future.delayed(pollInterval);
+    }
+    return false;
   }
 }

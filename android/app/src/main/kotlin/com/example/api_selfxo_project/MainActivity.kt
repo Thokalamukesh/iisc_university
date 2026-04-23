@@ -25,6 +25,7 @@ class MainActivity : FlutterActivity() {
     private val PRINTER_CHANNEL = "com.whimsicaldev/epson_usb"
     private val USB_EVENT_CHANNEL = "com.whimsicaldev/usb_events"
     private val POWER_CHANNEL = "com.selfx/kiosk_power"
+    private val DEVICE_SETTINGS_CHANNEL = "com.selfx/device_settings"
     private val USB_PERMISSION_ACTION by lazy { "${applicationContext.packageName}.USB_PERMISSION" }
 
     private lateinit var printerManager: PrinterManager
@@ -225,6 +226,47 @@ class MainActivity : FlutterActivity() {
                         }
                     } else {
                         result.success(false)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            DEVICE_SETTINGS_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "openWifiSettings" -> {
+                    try {
+                        showSystemUiTemporarily(30000)
+                        val intent = Intent(Settings.ACTION_WIFI_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        try {
+                            val fallback = Intent(Settings.ACTION_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(fallback)
+                            result.success(true)
+                        } catch (fallbackError: Exception) {
+                            result.error("OPEN_SETTINGS_FAILED", fallbackError.message, null)
+                        }
+                    }
+                }
+                "openSystemSettings" -> {
+                    try {
+                        showSystemUiTemporarily(30000)
+                        val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("OPEN_SETTINGS_FAILED", e.message, null)
                     }
                 }
                 else -> result.notImplemented()

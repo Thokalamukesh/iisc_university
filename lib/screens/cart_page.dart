@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 import 'payment_screen.dart';
 
 // Note: Replace with your actual Welcome Screen import if needed
@@ -22,8 +24,7 @@ class CartPage extends StatefulWidget {
     Map<String, dynamic>? variation,
     List<Map<String, dynamic>> modifiers,
     Rect? imageRect,
-  )
-  onAddRecommended;
+  ) onAddRecommended;
   final VoidCallback onBack;
   final VoidCallback onCartUpdated;
 
@@ -108,8 +109,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
       _payController.stop(canceled: true);
     }
     _payController.dispose();
-    _cartScrollController
-      ..dispose();
+    _cartScrollController..dispose();
     if (_maintenanceListener != null) {
       KioskMemoryService.instance.maintenanceTick.removeListener(
         _maintenanceListener!,
@@ -153,7 +153,6 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
   }
 
   void _updateQty(int index, int newQty) {
-    final int oldQty = _asInt(widget.cart[index]["qty"]);
     setState(() {
       if (newQty <= 0) {
         widget.cart.removeAt(index);
@@ -242,15 +241,14 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
     final price = int.tryParse(item["price"].toString()) ?? 0;
     final image =
         item["image"]?.toString() ?? item["item_photo_url"]?.toString() ?? "";
-    final variation =
-        item["variation"] as Map<String, dynamic>? ??
+    final variation = item["variation"] as Map<String, dynamic>? ??
         (item["variations"] is List && (item["variations"] as List).isNotEmpty
             ? Map<String, dynamic>.from(item["variations"][0])
             : null);
     final modifiers = item["modifiers"] is List
         ? (item["modifiers"] as List)
-              .map((e) => Map<String, dynamic>.from(e))
-              .toList()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList()
         : const <Map<String, dynamic>>[];
 
     final newQty = _totalQtyForProduct(id) + 1;
@@ -433,12 +431,16 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
             ],
           ),
         ),
-        title: Text(
-          "Your Cart (${widget.cart.length})",
-          style: TextStyle(
-            fontSize: isTablet ? 28 : 20,
-            fontWeight: FontWeight.w700,
-            color: Colors.white,
+        title: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            "Your Cart (${widget.cart.length})",
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: isTablet ? 28 : 20,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+            ),
           ),
         ),
         centerTitle: true,
@@ -668,8 +670,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                   final double cardHeight = isTablet ? 232 : 200;
                   final double imageHeight =
                       (cardHeight - (isTablet ? 76 : 68)).clamp(80, cardHeight);
-                  final double dpr =
-                      MediaQuery.of(context).devicePixelRatio;
+                  final double dpr = MediaQuery.of(context).devicePixelRatio;
                   final int cacheWidth =
                       (cardWidth * dpr).round().clamp(1, 2048);
                   final int cacheHeight =
@@ -686,8 +687,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                       itemBuilder: (_, index) {
                         final item = recs[index];
                         BuildContext? imageContext;
-                        final name =
-                            item["name"]?.toString() ??
+                        final name = item["name"]?.toString() ??
                             item["item_name"]?.toString() ??
                             "";
                         final price = item["price"] ?? 0;
@@ -722,21 +722,22 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                                       child: Builder(
                                         builder: (ctx) {
                                           imageContext = ctx;
+                                          final imageUrl =
+                                              normalizeImageUrl(image);
                                           return image.isNotEmpty
-                                              ? Image.network(
-                                                  image,
+                                              ? AppNetworkImage(
+                                                  url: imageUrl,
                                                   fit: BoxFit.cover,
                                                   width: double.infinity,
                                                   height: double.infinity,
                                                   cacheWidth: cacheWidth,
                                                   cacheHeight: cacheHeight,
-                                                  errorBuilder: (_, __, ___) =>
-                                                      const Center(
-                                                        child: Icon(
-                                                          Icons.fastfood,
-                                                          size: 24,
-                                                        ),
-                                                      ),
+                                                  fallback: const Center(
+                                                    child: Icon(
+                                                      Icons.fastfood,
+                                                      size: 24,
+                                                    ),
+                                                  ),
                                                 )
                                               : const Center(
                                                   child: Icon(
@@ -850,6 +851,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
     final int qty = item["qty"];
     final double dpr = MediaQuery.of(context).devicePixelRatio;
     final int imagePx = ((isTablet ? 70 : 34) * dpr).round();
+    final imageUrl = normalizeImageUrlValue(item["image"]);
 
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -863,16 +865,17 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: Image.network(
-              item["image"],
-              width: isTablet ? 70 : 34,
-              height: isTablet ? 70 : 34,
-              cacheWidth: imagePx,
-              cacheHeight: imagePx,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
-                  Icon(Icons.fastfood, size: isTablet ? 70 : 34),
-            ),
+            child: imageUrl.isNotEmpty
+                ? AppNetworkImage(
+                    url: imageUrl,
+                    width: isTablet ? 70 : 34,
+                    height: isTablet ? 70 : 34,
+                    cacheWidth: imagePx,
+                    cacheHeight: imagePx,
+                    fit: BoxFit.cover,
+                    fallback: Icon(Icons.fastfood, size: isTablet ? 70 : 34),
+                  )
+                : Icon(Icons.fastfood, size: isTablet ? 70 : 34),
           ),
           const SizedBox(width: 8),
           Expanded(

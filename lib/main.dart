@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
 import 'package:api_selfxo_project/screens/register_screen.dart';
+import 'package:api_selfxo_project/screens/web_qr_menu_entry.dart';
 import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
@@ -14,6 +16,8 @@ import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/core/kiosk_power.dart';
 import 'package:api_selfxo_project/core/kiosk_watchdog.dart';
+import 'package:api_selfxo_project/providers/restaurant_provider.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -52,15 +56,66 @@ Future<void> main() async {
       } catch (_) {}
     }
 
-    final Widget initialHome = (restaurantId == null ||
-            restaurantId.trim().isEmpty)
+    final Widget initialHome = kIsWeb
+        ? _resolveInitialWebHome()
+        : (restaurantId == null || restaurantId.trim().isEmpty)
         ? const UserIdScreen()
         : (setupDone ? const WelcomeScreen() : const RegisterKioskScreen());
 
-    runApp(MyApp(initialHome: initialHome));
+    runApp(
+      ChangeNotifierProvider(
+        create: (_) => RestaurantProvider(),
+        child: MyApp(initialHome: initialHome),
+      ),
+    );
   }, (error, stack) {
     reportUiCrash(error, stack);
   });
+}
+
+Widget _resolveInitialWebHome() {
+  final uri = Uri.base;
+  final restaurantId = _extractWebRestaurantId(uri);
+  final orderType = uri.queryParameters["order_type"] ??
+      uri.queryParameters["orderType"] ??
+      uri.queryParameters["type"];
+
+  if (restaurantId != null && restaurantId.isNotEmpty) {
+    return WebQrMenuEntryScreen(
+      restaurantId: restaurantId,
+      requestedOrderType: orderType,
+    );
+  }
+
+  return const UserIdScreen();
+}
+
+String? _extractWebRestaurantId(Uri uri) {
+  final segments = uri.pathSegments
+      .map((segment) => segment.trim())
+      .where((segment) => segment.isNotEmpty)
+      .toList();
+
+  for (var i = 0; i < segments.length - 1; i++) {
+    final current = segments[i].toLowerCase();
+    if (current == "restaurant" ||
+        current == "restaurants" ||
+        current == "menu" ||
+        current == "kiosk") {
+      final next = segments[i + 1].trim();
+      if (next.isNotEmpty) return next;
+    }
+  }
+
+  final queryRestaurant = uri.queryParameters["restaurant_id"] ??
+      uri.queryParameters["restaurantId"] ??
+      uri.queryParameters["restaurant"] ??
+      uri.queryParameters["slug"];
+  if (queryRestaurant != null && queryRestaurant.trim().isNotEmpty) {
+    return queryRestaurant.trim();
+  }
+
+  return null;
 }
 
 class MyApp extends StatefulWidget {

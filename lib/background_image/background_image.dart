@@ -5,10 +5,12 @@ import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/kiosk_api.dart';
+import '../screens/register_screen.dart';
 import '../screens/main_navigation.dart';
 import '../screens/pin_screen.dart';
 
@@ -20,19 +22,22 @@ class WelcomeScreen extends StatefulWidget {
 }
 
 class _WelcomeScreenState extends State<WelcomeScreen>
-    with TickerProviderStateMixin, WidgetsBindingObserver {
-  late PageController _pageController;
+    with WidgetsBindingObserver {
   Timer? _sliderTimer;
+  Timer? _adminTapResetTimer;
   VoidCallback? _maintenanceListener;
   VoidCallback? _mediaRefreshListener;
   int _mediaRefreshKey = 0;
 
   bool isLoading = true;
   bool hasError = false;
+  String? _errorDetails;
   bool _openingAdmin = false;
   bool _openingOrder = false;
   bool _loadingRestaurant = false;
+  bool _webMenuRedirected = false;
   VoidCallback? _onlineListener;
+  int _adminTapCount = 0;
 
   String restaurantName = "Start Your Order";
   List<String> banners = [];
@@ -40,11 +45,28 @@ class _WelcomeScreenState extends State<WelcomeScreen>
   bool _showDineIn = true;
   bool _showPickup = true;
 
+  Future<void> _redirectToRegisterScreen() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove("auth_token");
+    await prefs.remove("admin_token");
+    await prefs.remove("device_uuid");
+    await prefs.remove("device_id");
+    await prefs.setBool("kiosk_setup_done", false);
+
+    if (!mounted) return;
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const UserIdScreen()),
+      (_) => false,
+    );
+  }
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _pageController = PageController();
+    if (!kIsWeb) {
+      WidgetsBinding.instance.addObserver(this);
+    }
 
     _loadRestaurant();
 
@@ -62,18 +84,21 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     };
     ConnectivityService.instance.isOnline.addListener(_onlineListener!);
 
-    _maintenanceListener = _handleMaintenanceTick;
-    KioskMemoryService.instance.maintenanceTick.addListener(
-      _maintenanceListener!,
-    );
-    _mediaRefreshListener = _handleMediaRefreshTick;
-    KioskMemoryService.instance.mediaRefreshTick.addListener(
-      _mediaRefreshListener!,
-    );
+    if (!kIsWeb) {
+      _maintenanceListener = _handleMaintenanceTick;
+      KioskMemoryService.instance.maintenanceTick.addListener(
+        _maintenanceListener!,
+      );
+      _mediaRefreshListener = _handleMediaRefreshTick;
+      KioskMemoryService.instance.mediaRefreshTick.addListener(
+        _mediaRefreshListener!,
+      );
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (kIsWeb) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
@@ -97,6 +122,13 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       final kioskSettings = res.data["kiosk_settings"];
 
       final backendDeviceId = kioskSettings?["device_id"];
+      final hasBackendDeviceId = backendDeviceId != null &&
+          backendDeviceId.toString().trim().isNotEmpty;
+      if (!hasBackendDeviceId) {
+        await _redirectToRegisterScreen();
+        return;
+      }
+
       if (backendDeviceId != null && backendDeviceId.toString().isNotEmpty) {
         await prefs.setString("device_uuid", backendDeviceId.toString());
       }
@@ -141,22 +173,74 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       setState(() {
         restaurantName = restaurant?["name"] ?? "Start Your Order";
         banners = tempBanners;
+        currentIndex =
+            tempBanners.isEmpty ? 0 : currentIndex % tempBanners.length;
         _showDineIn = types["dine_in"] ?? true;
         _showPickup = types["pickup"] ?? true;
         isLoading = false;
         hasError = false;
+        _errorDetails = null;
       });
+
+      if (kIsWeb && !_webMenuRedirected) {
+        _webMenuRedirected = true;
+        final orderType = _resolveInitialWebOrderType(types);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            PageRouteBuilder(
+              pageBuilder: (_, __, ___) => MainNavigation(orderType: orderType),
+              transitionDuration: Duration.zero,
+              reverseTransitionDuration: Duration.zero,
+            ),
+          );
+        });
+        return;
+      }
 
       _startSlider();
     } catch (e) {
+      final rawError = e.toString();
+      final isRestaurantNotConfigured =
+          rawError.contains("RESTAURANT_NOT_CONFIGURED");
+
+      if (kIsWeb && isRestaurantNotConfigured) {
+        await _redirectToRegisterScreen();
+        return;
+      }
+
       if (!mounted) return;
       setState(() {
         hasError = true;
         isLoading = false;
+        _errorDetails = rawError;
       });
     } finally {
       _loadingRestaurant = false;
     }
+  }
+
+  String _resolveInitialWebOrderType(Map<String, bool> types) {
+    final requested = Uri.base.queryParameters["order_type"] ??
+        Uri.base.queryParameters["orderType"] ??
+        Uri.base.queryParameters["type"];
+    final normalizedRequested =
+        requested == null ? null : _normalizeOrderType(requested);
+
+    if (normalizedRequested == "pickup" ||
+        normalizedRequested == "takeaway" ||
+        normalizedRequested == "take_away") {
+      if (types["pickup"] == true) return "pickup";
+    }
+
+    if (normalizedRequested == "dine_in" || normalizedRequested == "dinein") {
+      if (types["dine_in"] == true) return "dine_in";
+    }
+
+    if (types["dine_in"] == true) return "dine_in";
+    if (types["pickup"] == true) return "pickup";
+    return "dine_in";
   }
 
   void _startSlider() {
@@ -164,15 +248,10 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     if (!KioskConfig.enableAutoScroll) return;
     if (banners.length < 2) return;
     _sliderTimer = Timer.periodic(const Duration(seconds: 6), (_) {
-      try {
-        if (!_pageController.hasClients) return;
+      if (!mounted || banners.isEmpty) return;
+      setState(() {
         currentIndex = (currentIndex + 1) % banners.length;
-        _pageController.animateToPage(
-          currentIndex,
-          duration: const Duration(milliseconds: 1500),
-          curve: Curves.easeInOutSine,
-        );
-      } catch (_) {}
+      });
     });
   }
 
@@ -181,12 +260,6 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     try {
       _sliderTimer?.cancel();
       if (banners.length < 2) return;
-      final int page = _pageController.hasClients
-          ? (_pageController.page?.round() ?? currentIndex)
-          : currentIndex;
-      _pageController.dispose();
-      _pageController = PageController(initialPage: page);
-      currentIndex = page;
       _startSlider();
     } catch (_) {}
   }
@@ -199,7 +272,9 @@ class _WelcomeScreenState extends State<WelcomeScreen>
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
+    if (!kIsWeb) {
+      WidgetsBinding.instance.removeObserver(this);
+    }
     if (_onlineListener != null) {
       ConnectivityService.instance.isOnline.removeListener(_onlineListener!);
     }
@@ -213,13 +288,20 @@ class _WelcomeScreenState extends State<WelcomeScreen>
         _mediaRefreshListener!,
       );
     }
+    _adminTapResetTimer?.cancel();
     _sliderTimer?.cancel();
-    _pageController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (kIsWeb) {
+      if (hasError) {
+        return _buildWebErrorScreen();
+      }
+      return _buildWebLoadingScreen();
+    }
+
     if (hasError) {
       return const Scaffold(
         backgroundColor: Colors.black,
@@ -243,156 +325,226 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     final int bannerCacheHeight = (screenSize.height * dpr).round();
 
     return Scaffold(
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: banners.isEmpty
-                ? Container(color: Colors.black)
-                : PageView.builder(
-                    key: ValueKey("banner-refresh-$_mediaRefreshKey"),
-                    controller: _pageController,
-                    itemCount: banners.length,
-                    itemBuilder: (_, i) => Image.network(
-                      banners[i],
-                      fit: BoxFit.cover,
-                      cacheWidth: bannerCacheWidth,
-                      cacheHeight: bannerCacheHeight,
-                      filterQuality: FilterQuality.low,
-                    ),
-                  ),
-          ),
-          Positioned.fill(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Colors.black38, Colors.transparent, Colors.black87],
-                ),
-              ),
-            ),
-          ),
-          Positioned(
-            top: -5,
-            left: -30,
-            right: -10, // 🔒 full width so right alignment works
-            child: SafeArea(
-              child: Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: isTablet ? 40 : 16,
-                  vertical: 10,
-                ),
-                child: Row(
-                  children: [
-                    _glassContainer(
-                      isTablet: isTablet,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            restaurantName.toUpperCase(),
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: isTablet ? 24 : 16,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1.2,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            "(A PRODUCT OF SIRIXO)",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: isTablet ? 12 : 10,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 1.1,
-                            ),
-                          ),
-                        ],
+      body: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) {
+          if (_openingAdmin) return;
+          _handleHiddenAdminTap();
+        },
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: banners.isEmpty
+                  ? Container(color: Colors.black)
+                  : AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 900),
+                      switchInCurve: Curves.easeInOut,
+                      switchOutCurve: Curves.easeInOut,
+                      transitionBuilder: (child, animation) =>
+                          FadeTransition(opacity: animation, child: child),
+                      child: Image.network(
+                        banners[currentIndex % banners.length],
+                        key: ValueKey(
+                          "banner-refresh-$_mediaRefreshKey-${currentIndex % banners.length}",
+                        ),
+                        fit: BoxFit.cover,
+                        cacheWidth: bannerCacheWidth,
+                        cacheHeight: bannerCacheHeight,
+                        filterQuality: FilterQuality.low,
                       ),
                     ),
-
-                    const Spacer(), // 👈 pushes icon to the right
-
-                    _adminWithStatus(isTablet),
-                  ],
+            ),
+            Positioned.fill(
+              child: Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black38,
+                      Colors.transparent,
+                      Colors.black87
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-
-          Positioned(
-            bottom: isTablet ? 80 : 40,
-            left: isTablet ? 100 : 20,
-            right: isTablet ? 80 : 20,
-            child: _orderPanel(isTablet),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _adminWithStatus(bool isTablet) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: ConnectivityService.instance.isOnline,
-      builder: (_, online, __) {
-        return Stack(
-          clipBehavior: Clip.none,
-          children: [
-            _adminButton(isTablet),
             Positioned(
-              top: -10,
-              right: -25,
-              child: Container(
-                width: isTablet ? 12 : 10,
-                height: isTablet ? 12 : 10,
-                decoration: BoxDecoration(
-                  color: online
-                      ? const Color.fromARGB(151, 105, 240, 175)
-                      : Colors.redAccent,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 2),
-                  boxShadow: [
-                    BoxShadow(
-                      color: online ? Colors.green : Colors.red,
-                      blurRadius: 6,
-                      spreadRadius: 1,
-                    ),
-                  ],
+              top: -5,
+              left: -30,
+              right: -10, // 🔒 full width so right alignment works
+              child: SafeArea(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: isTablet ? 40 : 16,
+                    vertical: 10,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: _glassContainer(
+                            isTablet: isTablet,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  restaurantName.toUpperCase(),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: isTablet ? 24 : 16,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1.2,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  "(A PRODUCT OF SIRIXO)",
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: isTablet ? 12 : 10,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 1.1,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
+            ),
+            Positioned(
+              bottom: isTablet ? 80 : 40,
+              left: isTablet ? 100 : 20,
+              right: isTablet ? 80 : 20,
+              child: _orderPanel(isTablet),
             ),
           ],
-        );
-      },
+        ),
+      ),
     );
   }
 
-  Widget _adminButton(bool isTablet) {
-    return IconButton(
-      icon: Icon(
-        Icons.person_rounded,
-        color: Colors.white,
-        size: isTablet ? 30 : 30,
+  Widget _buildWebLoadingScreen() {
+    return const Scaffold(
+      backgroundColor: Colors.white,
+      body: Center(
+        child: CircularProgressIndicator(),
       ),
-      onPressed: _openingAdmin
-          ? null
-          : () async {
-              setState(() => _openingAdmin = true);
-              await showDialog(
-                context: context,
-                barrierDismissible: false,
-                builder: (_) => const PinScreen(),
-              );
-              if (!mounted) return;
-              setState(() {
-                _openingAdmin = false;
-                isLoading = true;
-              });
-              _loadRestaurant();
-            },
     );
+  }
+
+  Widget _buildWebErrorScreen() {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.cloud_off_rounded,
+                color: Colors.white,
+                size: 44,
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                "Web startup failed",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                "This usually means a web-only startup problem such as CORS or mobile-only code being used in the browser.",
+                style: TextStyle(color: Colors.white70, height: 1.4),
+                textAlign: TextAlign.center,
+              ),
+              if (_errorDetails != null &&
+                  _errorDetails!.trim().isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.12),
+                    ),
+                  ),
+                  child: Text(
+                    _errorDetails!,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                    textAlign: TextAlign.left,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 18),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    isLoading = true;
+                    hasError = false;
+                  });
+                  _loadRestaurant();
+                },
+                child: const Text("Retry"),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleHiddenAdminTap() {
+    _adminTapResetTimer?.cancel();
+    _adminTapCount += 1;
+
+    if (_adminTapCount >= 5) {
+      _adminTapCount = 0;
+      _openAdminPin();
+      return;
+    }
+
+    _adminTapResetTimer = Timer(const Duration(seconds: 3), () {
+      _adminTapCount = 0;
+    });
+  }
+
+  Future<void> _openAdminPin() async {
+    if (_openingAdmin || !mounted) return;
+    setState(() => _openingAdmin = true);
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const PinScreen(),
+    );
+    if (!mounted) return;
+    setState(() {
+      _openingAdmin = false;
+      isLoading = true;
+    });
+    _loadRestaurant();
   }
 
   Widget _orderPanel(bool isTablet) {
@@ -415,7 +567,6 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             ),
           ),
           const SizedBox(height: 10),
-
           const SizedBox(height: 40),
           if (_showDineIn || _showPickup)
             Builder(
@@ -425,7 +576,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     child: SizedBox(
                       width: isTablet ? 360 : 240,
                       child: _orderButton(
-                        "EAT HERE",
+                        "   EAT HERE",
                         Icons.restaurant_rounded,
                         Colors.green.shade700,
                         "dine_in",
@@ -569,8 +720,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     final sources = [kioskSettings, restaurant];
     for (final src in sources) {
       if (src is! Map) continue;
-      final v =
-          src["gst_number"] ??
+      final v = src["gst_number"] ??
           src["gstin"] ??
           src["tax_id"] ??
           src["taxId"] ??
@@ -635,8 +785,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
               Navigator.pushReplacement(
                 context,
                 PageRouteBuilder(
-                  pageBuilder: (_, __, ___) =>
-                      MainNavigation(orderType: type),
+                  pageBuilder: (_, __, ___) => MainNavigation(orderType: type),
                   transitionDuration: Duration.zero,
                   reverseTransitionDuration: Duration.zero,
                 ),
@@ -688,7 +837,10 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     return ClipRRect(
       borderRadius: BorderRadius.circular(15),
       child: Container(
-        constraints: BoxConstraints(minWidth: isTablet ? 260 : 180),
+        constraints: BoxConstraints(
+          minWidth: isTablet ? 260 : 0,
+          maxWidth: isTablet ? 420 : 220,
+        ),
         padding: EdgeInsets.symmetric(
           horizontal: isTablet ? 20 : 14,
           vertical: isTablet ? 10 : 8,

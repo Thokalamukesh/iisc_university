@@ -3,16 +3,21 @@ import 'dart:convert';
 
 import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
+import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
+import 'package:api_selfxo_project/core/menu_sync.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/modules/product_model.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 import 'package:api_selfxo_project/widget/product_card.dart';
 import 'best_selling.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'register_screen.dart';
 
 class SelectionPainter extends CustomPainter {
   @override
@@ -77,8 +82,7 @@ class HomePage2 extends StatefulWidget {
     Map<String, dynamic>? variation,
     List<Map<String, dynamic>> modifiers,
     Rect? imageRect,
-  )
-  onAddToCart;
+  ) onAddToCart;
   final ValueChanged<Rect?> onCartIconRect;
   final Function(List<dynamic>) onProductsLoaded;
   final VoidCallback onRestart;
@@ -112,8 +116,53 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   List<dynamic> _rawProducts = [];
   final Map<int, Map<String, dynamic>> _productOverrides = {};
   static const String _overridesKey = "admin_product_overrides";
+  static const String _categoryOverridesKey = "admin_category_overrides";
+  final Map<int, Map<String, dynamic>> _categoryOverrides = {};
 
-  void _goToWelcome(BuildContext context) {
+  String? _extractBackendErrorMessage(Object error) {
+    if (error is DioException) {
+      final data = error.response?.data;
+      if (data is Map) {
+        final message = data["message"] ?? data["error"] ?? data["errors"];
+        if (message != null && message.toString().trim().isNotEmpty) {
+          return message.toString().trim();
+        }
+      }
+      if (error.message != null && error.message!.trim().isNotEmpty) {
+        return error.message!.trim();
+      }
+    }
+    return null;
+  }
+
+  bool _isNetworkError(Object error) {
+    if (error is! DioException) return false;
+    return error.type == DioExceptionType.connectionError ||
+        error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.receiveTimeout ||
+        error.type == DioExceptionType.sendTimeout;
+  }
+
+  Future<void> _goToWelcome(BuildContext context) async {
+    if (kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove("restaurant_id");
+      await prefs.remove("restaurant_name");
+      await prefs.remove("auth_token");
+      await prefs.remove("admin_token");
+      await prefs.remove("device_uuid");
+      await prefs.remove("device_id");
+      await prefs.setBool("kiosk_setup_done", false);
+
+      if (!mounted) return;
+      Navigator.of(this.context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const UserIdScreen()),
+        (route) => false,
+      );
+      return;
+    }
+
+    if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const WelcomeScreen()),
       (route) => false,
@@ -148,6 +197,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   bool _showScrollToTop = false;
   VoidCallback? _maintenanceListener;
   VoidCallback? _mediaRefreshListener;
+  VoidCallback? _menuSyncListener;
+  bool _pendingMenuReload = false;
 
   // Bottom bar animations
   late AnimationController _cartBounceController;
@@ -160,6 +211,15 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     _loadProducts();
+    _menuSyncListener = () {
+      if (!mounted) return;
+      if (_loadingProducts) {
+        _pendingMenuReload = true;
+        return;
+      }
+      _loadProducts();
+    };
+    MenuSync.revision.addListener(_menuSyncListener!);
 
     ConnectivityService.instance.start();
     _onlineListener = () {
@@ -196,29 +256,12 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
 
     _viewCartController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 350),
+      duration: const Duration(milliseconds: 320),
     );
     _viewCartScale = Tween<double>(
       begin: 1,
-      end: 1.13,
+      end: 1.06,
     ).chain(CurveTween(curve: Curves.easeInOut)).animate(_viewCartController);
-    _viewCartController.addStatusListener((s) {
-      if (!mounted) return;
-      try {
-        if (_totalItems() == 0) {
-          if (_viewCartController.isAnimating) {
-            _viewCartController.stop(canceled: true);
-            _viewCartController.reset();
-          }
-          return;
-        }
-        if (s == AnimationStatus.completed) {
-          _viewCartController.reverse();
-        } else if (s == AnimationStatus.dismissed) {
-          _viewCartController.forward();
-        }
-      } catch (_) {}
-    });
 
     _leftScrollHintController = AnimationController(
       vsync: this,
@@ -252,16 +295,16 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         setState(() {
           _showScrollArrow =
               _categoryScrollController.position.maxScrollExtent > 0 &&
-              _categoryScrollController.position.pixels <
-                  (_categoryScrollController.position.maxScrollExtent - 4);
+                  _categoryScrollController.position.pixels <
+                      (_categoryScrollController.position.maxScrollExtent - 4);
         });
       }
     });
 
     _lastItemCount = _totalItems();
-    if (_lastItemCount > 0) {
+    if (_lastItemCount > 0 && KioskConfig.enableDecorativeAnimations) {
       _cartBounceController.forward(from: 0);
-      _viewCartController.forward(from: 0);
+      _viewCartController.repeat(reverse: true);
     }
 
     _maintenanceListener = _handleMaintenanceTick;
@@ -312,6 +355,9 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     }
     _retryTimer?.cancel();
     _categorySyncTimer?.cancel();
+    if (_menuSyncListener != null) {
+      MenuSync.revision.removeListener(_menuSyncListener!);
+    }
     super.dispose();
   }
 
@@ -337,13 +383,15 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final count = _totalItems();
     if (count > _lastItemCount && KioskConfig.enableDecorativeAnimations) {
       _cartBounceController.forward(from: 0);
-      _viewCartController.forward(from: 0);
+      if (!_viewCartController.isAnimating) {
+        _viewCartController.repeat(reverse: true);
+      }
     }
     if (count == 0) {
       if (_viewCartController.isAnimating) {
         _viewCartController.stop(canceled: true);
-        _viewCartController.reset();
       }
+      _viewCartController.reset();
     }
     _lastItemCount = count;
 
@@ -380,9 +428,11 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     }
     try {
       await _loadProductOverrides();
+      await _loadCategoryOverrides();
       final res = await KioskApi().getProducts();
 
-      final List raw = res.data["products"] ?? [];
+      final List raw = _cloneRawProducts(res.data["products"] ?? []);
+      _applyOverridesToRawProducts(raw);
       _rawProducts = raw;
       widget.onProductsLoaded(raw);
 
@@ -400,7 +450,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
               name: p["name"] ?? "",
               category: p["category"] ?? "Others",
               price: int.tryParse(p["price"].toString()) ?? 0,
-              image: p["image"] ?? "",
+              image: normalizeImageUrlValue(p["image"]),
               type: p["type"],
             ),
           )
@@ -411,9 +461,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       );
       if (_productOverrides.isNotEmpty) {
         final overrideCats = _productOverrides.values
-            .map((o) => o["category_name"] ?? o["category"])
-            .where((o) => o != null && o.toString().trim().isNotEmpty)
-            .map((o) => o.toString())
+            .map((o) => _categoryLabel(o["category_name"] ?? o["category"]))
+            .where((o) => o.trim().isNotEmpty)
             .toSet();
         for (final c in overrideCats) {
           if (!tempCategories.contains(c)) {
@@ -427,6 +476,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
 
       final tempCatImages = Map<String, String>.from(
         parsed["categoryImages"] ?? const <String, String>{},
+      ).map(
+        (key, value) => MapEntry(key, normalizeImageUrl(value)),
       );
 
       variationsMap
@@ -481,8 +532,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
           }
           // Check Right Product Area
           if (scrollCtrl.hasClients) {
-            _showProductScrollHint =
-                scrollCtrl.position.maxScrollExtent > 0 &&
+            _showProductScrollHint = scrollCtrl.position.maxScrollExtent > 0 &&
                 scrollCtrl.position.pixels <= 4;
           }
         });
@@ -491,10 +541,18 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     } catch (e) {
       final online = ConnectivityService.instance.isOnline.value;
       final hasCachedData = allProducts.isNotEmpty;
+      final backendMessage = _extractBackendErrorMessage(e);
+      final isNetworkIssue = _isNetworkError(e);
 
       if (!mounted) return;
 
-      if (online) {
+      if (online && !isNetworkIssue && backendMessage != null) {
+        setState(() {
+          errorMessage = backendMessage;
+          hasError = !hasCachedData;
+          isLoading = false;
+        });
+      } else if (online) {
         // If internet is back, don't block UI—just retry.
         setState(() {
           hasError = false;
@@ -513,18 +571,27 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       }
     } finally {
       _loadingProducts = false;
+      if (_pendingMenuReload && mounted) {
+        _pendingMenuReload = false;
+        Future<void>.microtask(_loadProducts);
+      }
     }
   }
 
   void _precacheProductImages() {
     if (!mounted) return;
+    if (kIsWeb) return;
     final context = this.context;
     final int maxItems = 24;
     final productsToCache = allProducts.take(maxItems);
     for (final p in productsToCache) {
       final url = p.image.trim();
       if (url.isNotEmpty) {
-        precacheImage(NetworkImage(url), context);
+        precacheImage(
+          NetworkImage(url),
+          context,
+          onError: (_, __) {},
+        );
       }
     }
     int cached = 0;
@@ -532,7 +599,11 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       if (cached >= 8) break;
       final u = url.trim();
       if (u.isEmpty) continue;
-      precacheImage(NetworkImage(u), context);
+      precacheImage(
+        NetworkImage(u),
+        context,
+        onError: (_, __) {},
+      );
       cached++;
     }
   }
@@ -620,9 +691,14 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
           _leftScrollHintController.reset();
           _leftScrollHintController.repeat(reverse: true);
         }
-        if (_viewCartController.isAnimating) {
+        if (_totalItems() > 0) {
+          if (_viewCartController.isAnimating) {
+            _viewCartController.reset();
+          }
+          _viewCartController.repeat(reverse: true);
+        } else if (_viewCartController.isAnimating) {
+          _viewCartController.stop(canceled: true);
           _viewCartController.reset();
-          _viewCartController.forward();
         }
         if (_cartBounceController.isAnimating) {
           _cartBounceController.reset();
@@ -652,6 +728,38 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       _productOverrides
         ..clear()
         ..addAll(
+          decoded.map((k, v) {
+            final override = v is Map
+                ? Map<String, dynamic>.from(v as Map)
+                : <String, dynamic>{};
+            final normalizedCategory = _categoryLabel(
+              override["category_name"] ?? override["category"],
+              fallback: "",
+            );
+            if (normalizedCategory.isNotEmpty) {
+              override["category_name"] = normalizedCategory;
+              override["category"] = normalizedCategory;
+            }
+            return MapEntry(int.tryParse(k.toString()) ?? 0, override);
+          })
+            ..removeWhere((key, value) => key == 0),
+        );
+    } catch (_) {}
+  }
+
+  Future<void> _loadCategoryOverrides() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_categoryOverridesKey);
+      if (raw == null || raw.isEmpty) {
+        _categoryOverrides.clear();
+        return;
+      }
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      _categoryOverrides
+        ..clear()
+        ..addAll(
           decoded.map(
             (k, v) => MapEntry(
               int.tryParse(k.toString()) ?? 0,
@@ -664,6 +772,108 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     } catch (_) {}
   }
 
+  List _cloneRawProducts(List rawProducts) {
+    return rawProducts.map((category) {
+      if (category is! Map) return category;
+      final map = Map<String, dynamic>.from(category);
+      final items = map["items"];
+      if (items is List) {
+        map["items"] = items.map((item) {
+          if (item is! Map) return item;
+          final itemMap = Map<String, dynamic>.from(item);
+          final nested = itemMap["item"];
+          if (nested is Map) {
+            itemMap["item"] = Map<String, dynamic>.from(nested);
+          }
+          return itemMap;
+        }).toList();
+      }
+      return map;
+    }).toList();
+  }
+
+  int? _rawCategoryId(Map<String, dynamic> category) {
+    final raw = category["category_id"] ?? category["id"];
+    if (raw is int) return raw;
+    return int.tryParse(raw?.toString() ?? "");
+  }
+
+  String _categoryLabel(dynamic raw, {String fallback = "Others"}) {
+    if (raw is Map) {
+      final nested = raw["category_name"] ??
+          raw["name"] ??
+          raw["category"] ??
+          raw["title"];
+      if (!identical(nested, raw)) {
+        return _categoryLabel(nested, fallback: fallback);
+      }
+    }
+
+    final text = raw?.toString().trim() ?? "";
+    if (text.isEmpty) return fallback;
+
+    if (text.startsWith("{") && text.endsWith("}")) {
+      final categoryMatch = RegExp(
+        r"category_name\s*:\s*([^,}]+)",
+      ).firstMatch(text);
+      if (categoryMatch != null) {
+        final value = categoryMatch.group(1)?.trim();
+        if (value != null && value.isNotEmpty) return value;
+      }
+
+      final nameMatch = RegExp(r"name\s*:\s*([^,}]+)").firstMatch(text);
+      if (nameMatch != null) {
+        final value = nameMatch.group(1)?.trim();
+        if (value != null && value.isNotEmpty) return value;
+      }
+    }
+
+    return text;
+  }
+
+  void _applyOverridesToRawProducts(List rawProducts) {
+    for (final category in rawProducts) {
+      if (category is! Map) continue;
+      final categoryMap = Map<String, dynamic>.from(category);
+      final categoryId = _rawCategoryId(categoryMap);
+      if (categoryId != null) {
+        final categoryOverride = _categoryOverrides[categoryId];
+        if (categoryOverride != null) {
+          categoryMap.addAll(categoryOverride);
+        }
+      }
+
+      final items = categoryMap["items"];
+      if (items is List) {
+        for (final item in items) {
+          if (item is! Map) continue;
+          final itemMap = Map<String, dynamic>.from(item);
+          final nested = itemMap["item"];
+          final nestedMap =
+              nested is Map ? Map<String, dynamic>.from(nested) : null;
+          final itemId = _resolveItemId(itemMap);
+          if (itemId == 0) continue;
+          final override = _productOverrides[itemId];
+          if (override == null) continue;
+          itemMap.addAll(override);
+          final nestedAfter = itemMap["item"];
+          if (nestedAfter is Map) {
+            for (final entry in override.entries) {
+              nestedAfter[entry.key] = entry.value;
+            }
+          }
+          item
+            ..clear()
+            ..addAll(itemMap);
+        }
+      }
+
+      category
+        ..clear()
+        ..addAll(categoryMap);
+    }
+  }
+
   void _applyOverridesToProductMaps(List<Map<String, dynamic>> productMaps) {
     if (_productOverrides.isEmpty) return;
     final Set<int> seenIds = {};
@@ -674,6 +884,10 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       seenIds.add(pid);
       final override = _productOverrides[pid];
       if (override == null) continue;
+      final isAvailable = _isProductEntryAvailable(p, override: override);
+      p["is_available"] = isAvailable ? 1 : 0;
+      p["isAvailable"] = isAvailable ? 1 : 0;
+      p["available"] = isAvailable ? 1 : 0;
       final name = override["item_name"] ?? override["name"];
       if (name != null && name.toString().trim().isNotEmpty) {
         p["name"] = name;
@@ -683,33 +897,39 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         p["price"] = price;
       }
       final category = override["category_name"] ?? override["category"];
-      if (category != null && category.toString().trim().isNotEmpty) {
-        p["category"] = category;
+      final normalizedCategory = _categoryLabel(category, fallback: "");
+      if (normalizedCategory.isNotEmpty) {
+        p["category"] = normalizedCategory;
       }
       final type = override["type"];
       if (type != null) {
         p["type"] = type;
       }
-      final image =
-          override["item_photo_url"] ?? override["image"];
+      final image = override["item_photo_url"] ?? override["image"];
       if (image != null && image.toString().trim().isNotEmpty) {
-        p["image"] = image;
+        p["image"] = normalizeImageUrlValue(image);
       }
     }
+
+    productMaps.removeWhere((p) => !_isProductEntryAvailable(p));
 
     // Add missing items from overrides (newly created products)
     for (final entry in _productOverrides.entries) {
       if (seenIds.contains(entry.key)) continue;
       final o = entry.value;
+      if (!_isProductEntryAvailable(o)) continue;
       final name = (o["item_name"] ?? o["name"] ?? "").toString();
       final price = o["price"] ?? o["item_price"] ?? 0;
       if (name.trim().isEmpty) continue;
       productMaps.add({
         "id": entry.key,
         "name": name,
-        "category": o["category_name"] ?? o["category"] ?? "Others",
+        "category": _categoryLabel(
+          o["category_name"] ?? o["category"],
+          fallback: "Others",
+        ),
         "price": price,
-        "image": o["item_photo_url"] ?? o["image"] ?? "",
+        "image": normalizeImageUrlValue(o["item_photo_url"] ?? o["image"]),
         "type": o["type"],
       });
     }
@@ -738,6 +958,24 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     return parsed == 1 || parsed == 1.0;
   }
 
+  bool _isProductEntryAvailable(
+    Map? item, {
+    Map<String, dynamic>? override,
+  }) {
+    final nested = item?["item"];
+    final nestedMap = nested is Map ? Map<String, dynamic>.from(nested) : null;
+    final raw = override?["is_available"] ??
+        override?["isAvailable"] ??
+        override?["available"] ??
+        item?["is_available"] ??
+        item?["isAvailable"] ??
+        item?["available"] ??
+        nestedMap?["is_available"] ??
+        nestedMap?["isAvailable"] ??
+        nestedMap?["available"];
+    return raw == null || _debugIsTruthy(raw);
+  }
+
   String _debugNormKey(String k) =>
       k.toLowerCase().replaceAll(RegExp(r"[^a-z0-9]"), "");
 
@@ -757,6 +995,19 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   int _debugToInt(dynamic value) {
     if (value is int) return value;
     return int.tryParse(value?.toString() ?? "") ?? 0;
+  }
+
+  int _resolveItemId(Map item) {
+    return _debugToInt(
+      item["item_id"] ??
+          item["itemId"] ??
+          (item["item"] is Map ? item["item"]["item_id"] : null) ??
+          (item["item"] is Map ? item["item"]["itemId"] : null) ??
+          (item["item"] is Map ? item["item"]["id"] : null) ??
+          item["id"] ??
+          item["Id"] ??
+          item["ID"],
+    );
   }
 
   List<Map<String, dynamic>> _collectRecommendationDebugItems() {
@@ -885,9 +1136,86 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       );
     }
     if (hasError) {
-      return const Scaffold(
+      return Scaffold(
+        backgroundColor: const Color(0xFFF7F7F7),
         body: Center(
-          child: CircularProgressIndicator(color: Color(0xFF9F342C)),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.08),
+                      blurRadius: 20,
+                      offset: const Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 72,
+                      height: 72,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFFFF1EE),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.error_outline_rounded,
+                        size: 38,
+                        color: Color(0xFF9F342C),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      "Unable to load menu",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8F8F9),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: const Color(0xFFE3E6EA)),
+                      ),
+                      child: Text(
+                        errorMessage,
+                        style: const TextStyle(
+                          color: Colors.black87,
+                          height: 1.45,
+                        ),
+                        textAlign: TextAlign.left,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _loadProducts,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF9F342C),
+                          foregroundColor: Colors.white,
+                        ),
+                        child: const Text("Retry"),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       );
     }
@@ -902,8 +1230,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final gridCount = width < 600
         ? 2
         : width < 900
-        ? 3
-        : 4;
+            ? 3
+            : 4;
 
     // 🎯 FIX: We wrap the whole body in a Row so the Left Bar is independent
     // of the main content scroll and spans the full height.
@@ -930,7 +1258,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
           if (_showScrollToTop)
             Positioned(
               right: 18,
-              bottom: (isTablet ? 110 : 96),
+              bottom: _bottomBarBaseHeight(isTablet) + 14,
               child: FloatingActionButton(
                 onPressed: () {
                   if (!scrollCtrl.hasClients) return;
@@ -1002,20 +1330,11 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                               : i == selectedIndex;
                           final catName = categories[i];
                           final double cacheScale = scale < 1 ? 1 : scale;
-                          final int imageSize = (radius * 2 * cacheScale * dpr)
-                              .round();
-                          ImageProvider? imageProvider;
-                          if (catName == "All") {
-                            imageProvider = const AssetImage(
-                              "assets/catall.jpg",
-                            );
-                          } else if (categoryImages.containsKey(catName)) {
-                            imageProvider = ResizeImage(
-                              NetworkImage(categoryImages[catName]!),
-                              width: imageSize,
-                              height: imageSize,
-                            );
-                          }
+                          final int imageSize =
+                              (radius * 2 * cacheScale * dpr).round();
+                          final String categoryImageUrl = normalizeImageUrl(
+                            categoryImages[catName],
+                          );
                           return Builder(
                             builder: (ctx) {
                               _leftCategoryContexts[catName] = ctx;
@@ -1049,7 +1368,6 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                           painter: SelectionPainter(),
                                         ),
                                       ),
-
                                     Container(
                                       padding: EdgeInsets.symmetric(
                                         vertical: isTablet ? 20 : 15,
@@ -1093,25 +1411,64 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                                 child: SizedBox(
                                                   width: radius * 2,
                                                   height: radius * 2,
-                                                  child: imageProvider != null
-                                                      ? Image(
-                                                          image: imageProvider,
+                                                  child: catName == "All"
+                                                      ? Image.asset(
+                                                          "assets/catall.jpg",
                                                           fit: BoxFit.cover,
                                                           filterQuality:
                                                               FilterQuality
                                                                   .high,
-                                                        )
-                                                      : Container(
-                                                          color: Colors.white10,
-                                                          child: Icon(
-                                                            Icons.fastfood,
+                                                          errorBuilder:
+                                                              (_, __, ___) =>
+                                                                  Container(
                                                             color:
-                                                                Colors.white70,
-                                                            size: isTablet
-                                                                ? 32
-                                                                : 24,
+                                                                Colors.white10,
+                                                            child: Icon(
+                                                              Icons.fastfood,
+                                                              color: Colors
+                                                                  .white70,
+                                                              size:
+                                                                  radius * 0.9,
+                                                            ),
                                                           ),
-                                                        ),
+                                                        )
+                                                      : categoryImageUrl
+                                                              .isNotEmpty
+                                                          ? AppNetworkImage(
+                                                              url:
+                                                                  categoryImageUrl,
+                                                              fit: BoxFit.cover,
+                                                              cacheWidth:
+                                                                  imageSize,
+                                                              cacheHeight:
+                                                                  imageSize,
+                                                              fallback:
+                                                                  Container(
+                                                                color: Colors
+                                                                    .white10,
+                                                                child: Icon(
+                                                                  Icons
+                                                                      .fastfood,
+                                                                  color: Colors
+                                                                      .white70,
+                                                                  size: isTablet
+                                                                      ? 32
+                                                                      : 24,
+                                                                ),
+                                                              ),
+                                                            )
+                                                          : Container(
+                                                              color: Colors
+                                                                  .white10,
+                                                              child: Icon(
+                                                                Icons.fastfood,
+                                                                color: Colors
+                                                                    .white70,
+                                                                size: isTablet
+                                                                    ? 32
+                                                                    : 24,
+                                                              ),
+                                                            ),
                                                 ),
                                               ),
                                             ),
@@ -1124,8 +1481,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                             child: Padding(
                                               padding:
                                                   const EdgeInsets.symmetric(
-                                                    vertical: 4,
-                                                  ),
+                                                vertical: 4,
+                                              ),
                                               child: Padding(
                                                 padding: const EdgeInsets.all(
                                                   8.0,
@@ -1138,15 +1495,14 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                                   style: TextStyle(
                                                     color: selected
                                                         ? Colors.black
-                                                        : Color.fromARGB(
+                                                        : const Color.fromARGB(
                                                             255,
                                                             242,
                                                             220,
                                                             188,
                                                           ),
-                                                    fontSize: isTablet
-                                                        ? 16
-                                                        : 14,
+                                                    fontSize:
+                                                        isTablet ? 16 : 14,
                                                     fontWeight: FontWeight.bold,
                                                   ),
                                                   child: Text(
@@ -1206,10 +1562,10 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final bool isTablet = width > 600;
     final bool sectionMode = selectedIndex == 0;
     final double leftBarWidth = isTablet ? 170 : 100;
-    final double rightAreaWidth = (width - leftBarWidth).clamp(320, width);
+    final double rightAreaWidth = (width - leftBarWidth).clamp(320.0, width);
     final double gridPadding = 24; // SliverPadding left + right
     final double crossAxisSpacing = isTablet ? 17 : 12;
-    final double gridWidth = (rightAreaWidth - gridPadding).clamp(200, width);
+    final double gridWidth = (rightAreaWidth - gridPadding).clamp(200.0, width);
     final double itemWidth =
         (gridWidth - ((gridCount - 1) * crossAxisSpacing)) / gridCount;
     final double imageHeight = itemWidth / 1.2;
@@ -1217,7 +1573,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final int imageCacheWidth = (itemWidth * dpr).round().clamp(1, 4096);
     final int imageCacheHeight = (imageHeight * dpr).round().clamp(1, 4096);
     final double bottomInset = MediaQuery.of(context).padding.bottom;
-    final double bottomBarHeight = isTablet ? 95 : 82;
+    final double bottomBarHeight = _bottomBarBaseHeight(isTablet);
     final double bottomSpace = bottomBarHeight + bottomInset + 16;
     return Column(
       children: [
@@ -1243,7 +1599,6 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                               onAddToCart: widget.onAddToCart,
                             ),
                           ),
-
                           const SliverToBoxAdapter(child: SizedBox(height: 8)),
                           if (sectionMode)
                             ..._buildCategorySections(
@@ -1279,11 +1634,11 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                 }, childCount: filtered.length),
                                 gridDelegate:
                                     SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: gridCount,
-                                      mainAxisSpacing: 12,
-                                      crossAxisSpacing: isTablet ? 17 : 12,
-                                      childAspectRatio: isTablet ? 0.69 : 0.62,
-                                    ),
+                                  crossAxisCount: gridCount,
+                                  mainAxisSpacing: 12,
+                                  crossAxisSpacing: isTablet ? 17 : 12,
+                                  childAspectRatio: isTablet ? 0.69 : 0.62,
+                                ),
                               ),
                             ),
                           SliverToBoxAdapter(
@@ -1402,10 +1757,14 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     );
   }
 
+  double _bottomBarBaseHeight(bool isTablet) {
+    return isTablet ? 100 : 132;
+  }
+
   Widget _bottomBar() {
     final bool isTablet = MediaQuery.of(context).size.width > 600;
     final double bottomInset = MediaQuery.of(context).padding.bottom;
-    final double baseHeight = isTablet ? 95 : 82;
+    final double baseHeight = _bottomBarBaseHeight(isTablet);
     final bool hasItems = _totalItems() > 0;
     final int totalItems = _totalItems();
     final int totalPrice = _totalPrice();
@@ -1436,159 +1795,228 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
             ),
           ],
         ),
-        child: Row(
-          children: [
-            // 1. CLEAR ACTION (Outlined)
-            SizedBox(
-              width: isTablet ? 130 : 110,
-              height: isTablet ? 54 : 46,
-              child: OutlinedButton.icon(
-                onPressed: hasItems ? widget.onClearCart : _showEmptyCartDialog,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color.fromARGB(255, 120, 33, 27),
-                  side: const BorderSide(color: accentOrange, width: 1),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-                icon: Icon(
-                  Icons.delete_outline_rounded,
-                  size: isTablet ? 24 : 18,
-                  color: const Color.fromARGB(255, 120, 33, 27),
-                ),
-                label: Text(
-                  "CLEAR",
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: isTablet ? 16 : 11,
-                    letterSpacing: 0.6,
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(width: 8),
-
-            // 2. TOTAL INFO (Expands to fill space)
-            Expanded(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Text(
-                      "Your order",
-                      style: TextStyle(
-                        color: Colors.grey.shade600,
-                        fontSize: isTablet ? 13 : 11,
-                        fontWeight: FontWeight.w700,
+        child: isTablet
+            ? Row(
+                children: [
+                  SizedBox(
+                    width: 130,
+                    height: 54,
+                    child: OutlinedButton.icon(
+                      onPressed:
+                          hasItems ? widget.onClearCart : _showEmptyCartDialog,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color.fromARGB(255, 120, 33, 27),
+                        side: const BorderSide(color: accentOrange, width: 1),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      icon: const Icon(
+                        Icons.delete_outline_rounded,
+                        size: 24,
+                        color: Color.fromARGB(255, 120, 33, 27),
+                      ),
+                      label: const Text(
+                        "CLEAR",
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 16,
+                          letterSpacing: 0.6,
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade200,
-                            borderRadius: BorderRadius.circular(1),
-                          ),
-                          child: Text(
-                            "$totalItems",
-                            style: TextStyle(
-                              fontSize: isTablet ? 12 : 10,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.grey.shade700,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                      child:
+                          _buildBottomBarSummary(totalItems, totalPrice, true)),
+                  const SizedBox(width: 12),
+                  SizedBox(
+                      width: 180,
+                      child: _buildViewCartButton(hasItems, true, cartGreen)),
+                ],
+              )
+            : Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _buildBottomBarSummary(totalItems, totalPrice, false),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 42,
+                          child: OutlinedButton(
+                            onPressed: hasItems
+                                ? widget.onClearCart
+                                : _showEmptyCartDialog,
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color.fromARGB(
+                                255,
+                                120,
+                                33,
+                                27,
+                              ),
+                              side: const BorderSide(
+                                color: accentOrange,
+                                width: 1,
+                              ),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Icon(
+                              Icons.delete_outline_rounded,
+                              size: 18,
+                              color: Color.fromARGB(255, 120, 33, 27),
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Text(
-                          "RS $totalPrice.00",
-                          style: TextStyle(
-                            color: const Color.fromARGB(255, 0, 0, 0),
-                            fontSize: isTablet ? 18 : 15,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(width: 12),
-
-            // 3. VIEW CART BUTTON (Compact & Fixed Width)
-            SizedBox(
-              width: isTablet ? 180 : 140, // Fixed width prevents stretching
-              child: ScaleTransition(
-                scale: _viewCartScale,
-                child: ElevatedButton(
-                  onPressed: () {
-                    if (!hasItems) {
-                      _showEmptyCartDialog();
-                      return;
-                    }
-                    widget.onViewCart();
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: cartGreen,
-                    foregroundColor: Colors.white,
-                    elevation: 4,
-                    shadowColor: cartGreen.withOpacity(0.4),
-                    padding: const EdgeInsets.symmetric(vertical: 0),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    minimumSize: const Size(double.infinity, 54),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      ScaleTransition(
-                        scale: _cartBounceAnim,
-                        child: Builder(
-                          builder: (ctx) {
-                            WidgetsBinding.instance.addPostFrameCallback((_) {
-                              if (!mounted) return;
-                              final render = ctx.findRenderObject();
-                              if (render is! RenderBox || !render.attached) {
-                                return;
-                              }
-                              final rect =
-                                  render.localToGlobal(Offset.zero) &
-                                  render.size;
-                              if (rect != _lastCartIconRect) {
-                                _lastCartIconRect = rect;
-                                widget.onCartIconRect(rect);
-                              }
-                            });
-                            return const Icon(
-                              Icons.shopping_cart,
-                              size: 18,
-                              color: Colors.white,
-                            );
-                          },
-                        ),
                       ),
                       const SizedBox(width: 8),
-                      Text(
-                        "VIEW CART",
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: isTablet ? 15 : 13,
-                          letterSpacing: 0.4,
+                      Expanded(
+                        flex: 2,
+                        child: SizedBox(
+                          height: 42,
+                          child:
+                              _buildViewCartButton(hasItems, false, cartGreen),
                         ),
                       ),
                     ],
                   ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildBottomBarSummary(int totalItems, int totalPrice, bool isTablet) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: isTablet ? 16 : 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              Icon(
+                Icons.shopping_bag,
+                size: isTablet ? 62 : 42,
+                color: const Color(0xFFFFA726),
+              ),
+              Transform.translate(
+                offset: Offset(0, isTablet ? 8 : 5),
+                child: Text(
+                  "$totalItems",
+                  style: TextStyle(
+                    fontSize: isTablet ? 19 : 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          SizedBox(width: isTablet ? 12 : 8),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  "Your order",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.grey.shade600,
+                    fontSize: isTablet ? 12 : 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  "RS $totalPrice.00",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontSize: isTablet ? 13 : 15,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildViewCartButton(bool hasItems, bool isTablet, Color cartGreen) {
+    return ScaleTransition(
+      scale: _viewCartScale,
+      child: ElevatedButton(
+        onPressed: () {
+          if (!hasItems) {
+            _showEmptyCartDialog();
+            return;
+          }
+          widget.onViewCart();
+        },
+        style: ElevatedButton.styleFrom(
+          backgroundColor: cartGreen,
+          foregroundColor: Colors.white,
+          elevation: 4,
+          shadowColor: cartGreen.withOpacity(0.4),
+          padding: const EdgeInsets.symmetric(vertical: 0, horizontal: 8),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(isTablet ? 16 : 12),
+          ),
+          minimumSize: Size(double.infinity, isTablet ? 54 : 42),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ScaleTransition(
+              scale: _cartBounceAnim,
+              child: Builder(
+                builder: (ctx) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (!mounted) return;
+                    final render = ctx.findRenderObject();
+                    if (render is! RenderBox || !render.attached) {
+                      return;
+                    }
+                    final rect =
+                        render.localToGlobal(Offset.zero) & render.size;
+                    if (rect != _lastCartIconRect) {
+                      _lastCartIconRect = rect;
+                      widget.onCartIconRect(rect);
+                    }
+                  });
+                  return Icon(
+                    Icons.shopping_cart,
+                    size: isTablet ? 18 : 16,
+                    color: Colors.white,
+                  );
+                },
+              ),
+            ),
+            SizedBox(width: isTablet ? 8 : 6),
+            Flexible(
+              child: Text(
+                "VIEW CART",
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: isTablet ? 15 : 11,
+                  letterSpacing: isTablet ? 0.4 : 0.2,
                 ),
               ),
             ),
@@ -1772,7 +2200,9 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
           },
           style: OutlinedButton.styleFrom(
             foregroundColor: const Color(0xFF9F342C),
-            side: BorderSide(color: const Color.fromARGB(255, 0, 0, 0)),
+            side: const BorderSide(
+              color: Color.fromARGB(255, 0, 0, 0),
+            ),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(26),
             ),
@@ -1942,11 +2372,14 @@ Map<String, dynamic> _parseProductsIsolate(List<dynamic> raw) {
 
   int resolveItemId(Map item) {
     return toInt(
-      item["id"] ??
+      item["item_id"] ??
+          item["itemId"] ??
+          (item["item"] is Map ? item["item"]["item_id"] : null) ??
+          (item["item"] is Map ? item["item"]["itemId"] : null) ??
+          (item["item"] is Map ? item["item"]["id"] : null) ??
+          item["id"] ??
           item["Id"] ??
-          item["ID"] ??
-          item["item_id"] ??
-          item["itemId"],
+          item["ID"],
     );
   }
 
@@ -1971,19 +2404,20 @@ Map<String, dynamic> _parseProductsIsolate(List<dynamic> raw) {
 
   for (final category in raw) {
     if (category is! Map) continue;
+    final rawCategoryActive =
+        category["is_active"] ?? category["isActive"] ?? category["active"];
     final bool catActive =
-        category["is_active"] == null || isTruthy(category["is_active"]);
+        rawCategoryActive == null || isTruthy(rawCategoryActive);
     if (!catActive) continue;
 
     final String catName = category["category_name"]?.toString() ?? "Others";
-    final String catImage =
-        category["item_photo_url"]?.toString() ??
+    final String catImage = category["item_photo_url"]?.toString() ??
         category["category_image"]?.toString() ??
         category["image"]?.toString() ??
         "";
 
     if (catImage.isNotEmpty) {
-      categoryImages[catName] = catImage;
+      categoryImages[catName] = normalizeImageUrl(catImage);
     }
 
     final items = category["items"];
@@ -1991,8 +2425,16 @@ Map<String, dynamic> _parseProductsIsolate(List<dynamic> raw) {
 
     for (final item in items) {
       if (item is! Map) continue;
-      final avail = item["is_available"] ?? item["isAvailable"];
-      if (!(avail == null || isTruthy(avail))) continue;
+      final nested = item["item"];
+      final nestedMap =
+          nested is Map ? Map<String, dynamic>.from(nested) : null;
+      final rawAvailability = item["is_available"] ??
+          item["isAvailable"] ??
+          item["available"] ??
+          nestedMap?["is_available"] ??
+          nestedMap?["isAvailable"] ??
+          nestedMap?["available"];
+      if (!(rawAvailability == null || isTruthy(rawAvailability))) continue;
 
       final int itemId = resolveItemId(item);
       if (itemId == 0) continue;
@@ -2000,26 +2442,23 @@ Map<String, dynamic> _parseProductsIsolate(List<dynamic> raw) {
       final variationsRaw = item["variations"];
       final List<Map<String, dynamic>> variations = variationsRaw is List
           ? variationsRaw
-                .whereType<Map>()
-                .map((e) => Map<String, dynamic>.from(e))
-                .toList()
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList()
           : <Map<String, dynamic>>[];
 
       final rawModifiers = item["modifiers"];
       final List<Map<String, dynamic>> modifiers =
           rawModifiers is Map && rawModifiers["options"] is List
-          ? (rawModifiers["options"] as List)
-                .whereType<Map>()
-                .map((e) => Map<String, dynamic>.from(e))
-                .toList()
-          : <Map<String, dynamic>>[];
+              ? (rawModifiers["options"] as List)
+                  .whereType<Map>()
+                  .map((e) => Map<String, dynamic>.from(e))
+                  .toList()
+              : <Map<String, dynamic>>[];
 
       variationsMap[itemId] = variations;
       modifiersMap[itemId] = modifiers;
 
-      final nested = item["item"];
-      final nestedMap =
-          nested is Map ? Map<String, dynamic>.from(nested) : null;
       final preferredType = firstNonEmptyType([
         item["type"],
         item["veg_type"],
@@ -2068,11 +2507,10 @@ Map<String, dynamic> _parseProductsIsolate(List<dynamic> raw) {
       String pickImage() {
         final direct = item["item_photo_url"] ?? item["image"];
         if (direct != null && direct.toString().trim().isNotEmpty) {
-          return direct.toString();
+          return normalizeImageUrlValue(direct);
         }
-        final nestedImage =
-            nestedMap?["item_photo_url"] ?? nestedMap?["image"];
-        return nestedImage?.toString() ?? "";
+        final nestedImage = nestedMap?["item_photo_url"] ?? nestedMap?["image"];
+        return normalizeImageUrlValue(nestedImage);
       }
 
       final String name = pickName();

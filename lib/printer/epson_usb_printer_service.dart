@@ -126,6 +126,7 @@ class EpsonUSBPrinterService {
   Future<void> printData({
     required Map<String, dynamic> printer,
     required List<Map<String, dynamic>> printObject,
+    int lineFeed = 3,
   }) async {
 
     await _ensureConnection(printer);
@@ -138,7 +139,7 @@ class EpsonUSBPrinterService {
 
       await _invoke<void>('printData', {
         'printObject': jsonEncode(printObject),
-        'lineFeed': 3,
+        'lineFeed': lineFeed,
         'deviceId': deviceId,
         'vendorId': vendorId,
         'productId': productId,
@@ -262,11 +263,6 @@ class EpsonUSBPrinterService {
         'text': 'Please visit again',
         'options': {'align': 1},
       },
-      // Add extra feed lines before cut to avoid mid-receipt cuts on some models
-      {'type': 'feedLine'},
-      {'type': 'feedLine'},
-      {'type': 'feedLine'},
-      {'type': 'feedLine'},
       {'type': 'feedLine'},
       {'type': 'fullCutPaper'},
     ];

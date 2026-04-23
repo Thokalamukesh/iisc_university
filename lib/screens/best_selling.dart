@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
+import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import '../modules/product_model.dart';
@@ -19,8 +19,7 @@ class BestSellingWidget extends StatefulWidget {
     Map<String, dynamic>? variation,
     List<Map<String, dynamic>> modifiers,
     Rect? imageRect,
-  )
-  onAddToCart;
+  ) onAddToCart;
 
   const BestSellingWidget({
     super.key,
@@ -43,7 +42,6 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
   VoidCallback? _maintenanceListener;
 
   static const Color kGreen = Colors.green;
-  static const Color kBg = Color(0xFFE8F5E9);
 
   @override
   void initState() {
@@ -77,14 +75,19 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
     final double nextFraction = isTablet ? 0.42 : 0.78;
     if (_viewportFraction != nextFraction) {
       _viewportFraction = nextFraction;
-      final int page = _pageController.hasClients
-          ? (_pageController.page?.round() ?? currentIndex)
-          : currentIndex;
-      _pageController.dispose();
-      _pageController = PageController(
-        viewportFraction: _viewportFraction,
-        initialPage: page,
-      );
+      final int page = currentIndex;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final oldController = _pageController;
+        _pageController = PageController(
+          viewportFraction: _viewportFraction,
+          initialPage: page,
+        );
+        oldController.dispose();
+        if (mounted) {
+          setState(() {});
+        }
+      });
     }
   }
 
@@ -109,32 +112,37 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
   void _prepareData() {
     if (widget.products.isEmpty) return;
     List<ProductModel> all = List.from(widget.products);
-    List<ProductModel> fastSelling = all
-        .where((p) => p.isBestSeller ?? false)
-        .toList();
+    List<ProductModel> fastSelling =
+        all.where((p) => p.isBestSeller ?? false).toList();
 
     if (fastSelling.length < 5) {
-      List<ProductModel> remaining = all
-          .where((p) => !fastSelling.contains(p))
-          .toList();
+      List<ProductModel> remaining =
+          all.where((p) => !fastSelling.contains(p)).toList();
       remaining.shuffle(Random());
       fastSelling.addAll(remaining.take(5 - fastSelling.length));
     }
 
-    setState(() => displayedProducts = fastSelling.take(5).toList());
+    final nextProducts = fastSelling.take(5).toList();
+    setState(() {
+      displayedProducts = nextProducts;
+      if (currentIndex >= displayedProducts.length) {
+        currentIndex = 0;
+      }
+    });
     _resetPager();
     _startAutoScroll();
   }
 
   void _resetPager() {
     if (displayedProducts.isEmpty) return;
-    final int start = displayedProducts.length * 1000;
-    _pageController.dispose();
-    _pageController = PageController(
-      viewportFraction: _viewportFraction,
-      initialPage: start,
-    );
-    currentIndex = start % displayedProducts.length;
+    currentIndex = 0;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_pageController.hasClients) return;
+      try {
+        _pageController.jumpToPage(currentIndex);
+      } catch (_) {}
+    });
   }
 
   void _handleMaintenanceTick() {
@@ -158,7 +166,7 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
         if (!_pageController.hasClients) return;
 
         final int currentPage = _pageController.page?.round() ?? currentIndex;
-        final next = currentPage + 1;
+        final next = (currentPage + 1) % displayedProducts.length;
         _pageController.animateToPage(
           next,
           duration: const Duration(milliseconds: 500),
@@ -183,32 +191,42 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
       children: [
         // 🌈 GRADIENT TITLE WITH ICON
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: EdgeInsets.symmetric(
+            horizontal: isTablet ? 16 : 12,
+            vertical: isTablet ? 12 : 8,
+          ),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Icon(
                 Icons.auto_awesome,
-                size: isTablet ? 26 : 24,
+                size: isTablet ? 26 : 20,
                 color: const Color(0xFF22E6C7), // sparkle color
               ),
               const SizedBox(width: 8),
-              ShaderMask(
-                shaderCallback: (bounds) {
-                  return const LinearGradient(
-                    colors: [
-                      Color(0xFF22E6C7), // teal
-                      Color(0xFF3A7BFF), // blue
-                      Color(0xFF9B4DFF), // purple
-                    ],
-                  ).createShader(bounds);
-                },
-                child: Text(
-                  "Top Selling Items (Today)",
-                  style: TextStyle(
-                    fontSize: isTablet ? 24 : 22,
-                    fontWeight: FontWeight.w900,
-                    color: Colors.white, // required for ShaderMask
-                    letterSpacing: 0.3,
+              Expanded(
+                child: ShaderMask(
+                  shaderCallback: (bounds) {
+                    return const LinearGradient(
+                      colors: [
+                        Color(0xFF22E6C7), // teal
+                        Color(0xFF3A7BFF), // blue
+                        Color(0xFF9B4DFF), // purple
+                      ],
+                    ).createShader(bounds);
+                  },
+                  child: Text(
+                    "Top Selling Items (Today)",
+                    maxLines: isTablet ? 1 : 2,
+                    softWrap: true,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: isTablet ? 24 : 18,
+                      fontWeight: FontWeight.w900,
+                      color: Colors.white, // required for ShaderMask
+                      letterSpacing: isTablet ? 0.3 : 0.1,
+                      height: 1.1,
+                    ),
                   ),
                 ),
               ),
@@ -218,35 +236,55 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
 
         // 📦 PRODUCT SLIDER CONTAINER
         Padding(
-          padding: const EdgeInsets.all(10),
+          padding: EdgeInsets.all(isTablet ? 10 : 8),
           child: Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 20),
+            padding: EdgeInsets.symmetric(vertical: isTablet ? 20 : 12),
             decoration: BoxDecoration(
               color: const Color.fromARGB(255, 242, 220, 188),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Column(
               children: [
-                SizedBox(
-                  height: isTablet ? 155 : 130,
-                  child: PageView.builder(
-                    controller: _pageController,
-                    padEnds: false,
-                    onPageChanged: (i) {
-                      final next = i % displayedProducts.length;
-                      if (next != currentIndex && mounted) {
-                        setState(() => currentIndex = next);
-                      }
-                    },
-                    itemBuilder: (_, i) => _buildProductCard(
-                      displayedProducts[i % displayedProducts.length],
-                      isTablet,
+                if (isTablet)
+                  SizedBox(
+                    height: 155,
+                    child: PageView.builder(
+                      key: ValueKey(_viewportFraction),
+                      controller: _pageController,
+                      padEnds: false,
+                      itemCount: displayedProducts.length,
+                      onPageChanged: (i) {
+                        final next = i;
+                        if (next != currentIndex && mounted) {
+                          setState(() => currentIndex = next);
+                        }
+                      },
+                      itemBuilder: (_, i) => _buildProductCard(
+                        displayedProducts[i],
+                        true,
+                      ),
+                    ),
+                  )
+                else
+                  SizedBox(
+                    height: 112,
+                    child: ListView.separated(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      scrollDirection: Axis.horizontal,
+                      physics: const ClampingScrollPhysics(),
+                      itemCount: displayedProducts.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (_, i) => SizedBox(
+                        width: (screenWidth * 0.56).clamp(160.0, 210.0),
+                        child: _buildProductCard(displayedProducts[i], false),
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                _buildDots(displayedProducts.length, isTablet),
+                if (isTablet) ...[
+                  const SizedBox(height: 12),
+                  _buildDots(displayedProducts.length, true),
+                ],
               ],
             ),
           ),
@@ -286,7 +324,7 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
     }
 
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 6),
+      margin: EdgeInsets.symmetric(horizontal: isTablet ? 6 : 3),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
@@ -307,7 +345,10 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
           ),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding: EdgeInsets.symmetric(
+                horizontal: isTablet ? 10 : 8,
+                vertical: isTablet ? 6 : 5,
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -318,36 +359,36 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
-                      fontSize: isTablet ? 16 : 12,
+                      fontSize: isTablet ? 16 : 11,
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  SizedBox(height: isTablet ? 2 : 1),
                   Text(
                     "₹${p.price}",
                     style: TextStyle(
                       color: const Color.fromARGB(255, 0, 0, 0),
-                      fontSize: isTablet ? 18 : 14,
+                      fontSize: isTablet ? 18 : 13,
                       fontWeight: FontWeight.w800,
                     ),
                   ),
                   if (needsCustomization)
-                    const Text(
+                    Text(
                       "Variants Available",
                       style: TextStyle(
-                        fontSize: 10,
+                        fontSize: isTablet ? 10 : 8.5,
                         color: Colors.orange,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                  const SizedBox(height: 6),
+                  SizedBox(height: isTablet ? 6 : 4),
                   qty == 0
                       ? _addButton(handleAdd, isTablet)
                       : _counter(
-                        p,
-                        qty,
-                        isTablet,
-                        () => _rectFromContext(imageContext),
-                      ),
+                          p,
+                          qty,
+                          isTablet,
+                          () => _rectFromContext(imageContext),
+                        ),
                 ],
               ),
             ),
@@ -363,17 +404,18 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
     required ValueChanged<BuildContext> onContextReady,
   }) {
     final dpr = MediaQuery.of(context).devicePixelRatio;
-    final double size = isTablet ? 110 : 80;
-    final double cardHeight = isTablet ? 155 : 130;
+    final double size = isTablet ? 110 : 64;
+    final double cardHeight = isTablet ? 155 : 112;
     final int cacheWidth = (size * dpr).round();
     final int cacheHeight = (cardHeight * dpr).round();
 
     return SizedBox(
       width: size,
-      height: double.infinity,
+      height: cardHeight,
       child: Builder(
         builder: (ctx) {
           onContextReady(ctx);
+          final imageUrl = normalizeImageUrl(p.image);
           return ClipRRect(
             borderRadius: const BorderRadius.horizontal(
               left: Radius.circular(14),
@@ -381,22 +423,37 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: Image.network(
-                    p.image,
-                    key: ValueKey("best-selling-image-${p.id}"),
-                    fit: BoxFit.cover,
-                    alignment: Alignment.center,
-                    filterQuality: FilterQuality.high,
-                    gaplessPlayback: true,
-                    cacheWidth: cacheWidth,
-                    cacheHeight: cacheHeight,
-                    errorBuilder: (_, __, ___) => Container(
-                      color: Colors.grey.shade200,
-                      child: const Icon(Icons.fastfood),
-                    ),
-                  ),
+                  child: imageUrl.isNotEmpty
+                      ? Image.network(
+                          imageUrl,
+                          key: ValueKey("best-selling-image-${p.id}"),
+                          fit: BoxFit.cover,
+                          alignment: Alignment.center,
+                          filterQuality: FilterQuality.low,
+                          gaplessPlayback: true,
+                          cacheWidth: cacheWidth,
+                          cacheHeight: cacheHeight,
+                          errorBuilder: (_, __, ___) => Container(
+                            color: Colors.grey.shade200,
+                            child: Icon(
+                              Icons.fastfood,
+                              size: isTablet ? 24 : 18,
+                            ),
+                          ),
+                        )
+                      : Container(
+                          color: Colors.grey.shade200,
+                          child: Icon(
+                            Icons.fastfood,
+                            size: isTablet ? 24 : 18,
+                          ),
+                        ),
                 ),
-                Positioned(top: 8, left: 8, child: _vegIcon(p.isVeg)),
+                Positioned(
+                  top: isTablet ? 8 : 6,
+                  left: isTablet ? 8 : 6,
+                  child: _vegIcon(p.isVeg),
+                ),
               ],
             ),
           );
@@ -406,22 +463,23 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
   }
 
   Widget _vegIcon(bool isVeg) => Container(
-    padding: const EdgeInsets.all(2),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: isVeg ? Colors.green : Colors.red, width: 1),
-    ),
-    child: Icon(
-      Icons.circle,
-      size: 6,
-      color: isVeg ? Colors.green : Colors.red,
-    ),
-  );
+        padding: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border:
+              Border.all(color: isVeg ? Colors.green : Colors.red, width: 1),
+        ),
+        child: Icon(
+          Icons.circle,
+          size: 6,
+          color: isVeg ? Colors.green : Colors.red,
+        ),
+      );
 
   Widget _addButton(VoidCallback onTap, bool isTablet) {
     return SizedBox(
       width: double.infinity,
-      height: isTablet ? 44 : 34,
+      height: isTablet ? 44 : 28,
       child: OutlinedButton(
         style: OutlinedButton.styleFrom(
           backgroundColor: const Color(0xFFF4C66A),
@@ -438,15 +496,15 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
             Icon(
               Icons.add,
               color: const Color(0xFF1F1F1F),
-              size: isTablet ? 18 : 16,
+              size: isTablet ? 18 : 13,
             ),
-            const SizedBox(width: 6),
+            SizedBox(width: isTablet ? 6 : 4),
             Text(
               "Add",
               style: TextStyle(
                 color: const Color(0xFF1F1F1F),
                 fontWeight: FontWeight.w800,
-                fontSize: isTablet ? 16 : 14,
+                fontSize: isTablet ? 16 : 12,
               ),
             ),
           ],
@@ -461,7 +519,7 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
     bool isTablet,
     Rect? Function() imageRectBuilder,
   ) {
-    final double buttonHeight = isTablet ? 40 : 32;
+    final double buttonHeight = isTablet ? 40 : 28;
     return SizedBox(
       height: buttonHeight,
       width: double.infinity,
@@ -504,7 +562,7 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
                 child: Text(
                   "$qty",
                   style: TextStyle(
-                    fontSize: isTablet ? 18 : 14,
+                    fontSize: isTablet ? 18 : 13,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -563,7 +621,7 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
           style: TextStyle(
             color: textColor,
             fontWeight: FontWeight.bold,
-            fontSize: isTablet ? 18 : 16,
+            fontSize: isTablet ? 18 : 14,
           ),
         ),
       ),

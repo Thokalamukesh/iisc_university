@@ -45,6 +45,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const MethodChannel _usbEvents = MethodChannel(
     'com.whimsicaldev/usb_events',
   );
+  static const MethodChannel _deviceSettings = MethodChannel(
+    'com.selfx/device_settings',
+  );
 
   @override
   void initState() {
@@ -118,6 +121,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
       MaterialPageRoute(builder: (_) => const WelcomeScreen()),
       (_) => false,
     );
+  }
+
+  Future<void> _openWifiSettings() async {
+    try {
+      await _deviceSettings.invokeMethod<void>('openWifiSettings');
+    } on PlatformException catch (e) {
+      _showSnackBar(e.message ?? "Unable to open WiFi settings", Colors.red);
+    } catch (_) {
+      _showSnackBar("Unable to open WiFi settings", Colors.red);
+    }
+  }
+
+  Future<void> _openSystemSettings() async {
+    try {
+      await _deviceSettings.invokeMethod<void>('openSystemSettings');
+    } on PlatformException catch (e) {
+      _showSnackBar(e.message ?? "Unable to open system settings", Colors.red);
+    } catch (_) {
+      _showSnackBar("Unable to open system settings", Colors.red);
+    }
   }
 
   // ================= LOAD SETTINGS =================
@@ -425,6 +448,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            onPressed: _openSystemSettings,
+            icon: const Icon(Icons.settings_rounded),
+            color: Colors.white,
+            tooltip: "System Settings",
+          ),
+          IconButton(
+            onPressed: _openWifiSettings,
+            icon: const Icon(Icons.wifi_rounded),
+            color: Colors.white,
+            tooltip: "WiFi Settings",
+          ),
           IconButton(
             onPressed: _goToWelcome,
             icon: const Icon(Icons.logout_rounded),
