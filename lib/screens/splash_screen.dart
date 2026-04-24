@@ -2,13 +2,9 @@ import 'dart:async';
 
 import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
-import 'package:api_selfxo_project/screens/register_screen.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
-import 'pin_screen.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -45,15 +41,14 @@ class _SplashScreenState extends State<SplashScreen> {
         _didNavigate = true;
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => const UserIdScreen()),
+          MaterialPageRoute(builder: (_) => const RegisterKioskScreen()),
         );
         return;
       }
 
       try {
         await DeviceBootstrap.ensureDeviceReady();
-      } catch (e) {
-      }
+      } catch (e) {}
 
       if (_didNavigate) return;
       _didNavigate = true;
@@ -64,8 +59,7 @@ class _SplashScreenState extends State<SplashScreen> {
               setupDone ? const WelcomeScreen() : const RegisterKioskScreen(),
         ),
       );
-    } catch (e) {
-    }
+    } catch (e) {}
   }
 
   Future<void> _delay(Duration duration) {

@@ -1663,11 +1663,20 @@ class _WebScanToPrintScreen extends StatefulWidget {
 }
 
 class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
+  static const int _autoReturnSeconds = 120;
+
   final FocusNode _focusNode = FocusNode(debugLabel: 'web-scan-print');
+  final TextEditingController _scanTextController = TextEditingController();
+  final FocusNode _scanTextFocusNode = FocusNode(
+    debugLabel: 'web-scan-print-input',
+  );
   final StringBuffer _scanBuffer = StringBuffer();
   Timer? _scanIdleTimer;
+  Timer? _scanTextIdleTimer;
   Timer? _focusKeepAliveTimer;
   Timer? _partialScanResetTimer;
+  Timer? _autoReturnTimer;
+  Timer? _autoReturnCountdownTimer;
   StreamSubscription<html.KeyboardEvent>? _htmlWindowKeyDownSub;
   StreamSubscription<html.KeyboardEvent>? _htmlWindowKeyPressSub;
   StreamSubscription<html.Event>? _htmlWindowFocusSub;
@@ -1681,10 +1690,13 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
   Timer? _domScannerIdleTimer;
   final StringBuffer _domScannerBuffer = StringBuffer();
   bool _openingPrint = false;
+  bool _isNavigating = false;
   String? _lastScan;
+  String? _printError;
   String _pendingScanPrefix = '';
   String _scanStatusText =
-      "Keep scanner focused on this screen and scan QR or barcode.";
+      "Keep scanner focused and scan this pickup QR to print.";
+  int _autoReturnRemaining = _autoReturnSeconds;
   late final KeyEventCallback _globalKeyHandler;
   DateTime _lastFlutterKeyAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastHtmlKey = '';
@@ -1692,7 +1704,7 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
   String _lastConsumedValue = '';
   DateTime _lastConsumedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  String get _scanCode => widget.orderNumber.toString();
+  String get _scanCode => "PRINT_ORDER_${widget.orderNumber}";
 
   @override
   void initState() {
@@ -1730,9 +1742,10 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
       event.preventDefault();
     });
     _setupDomScannerCapture();
+    _startAutoReturnTimer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusScannerInput();
-      _logScan('screen ready; expected order="$_scanCode"');
+      _logScan('screen ready; expected pickup="$_scanCode"');
     });
     _focusKeepAliveTimer = Timer.periodic(const Duration(milliseconds: 900), (
       _,
@@ -1745,8 +1758,11 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
   @override
   void dispose() {
     _scanIdleTimer?.cancel();
+    _scanTextIdleTimer?.cancel();
     _focusKeepAliveTimer?.cancel();
     _partialScanResetTimer?.cancel();
+    _autoReturnTimer?.cancel();
+    _autoReturnCountdownTimer?.cancel();
     _htmlWindowKeyDownSub?.cancel();
     _htmlWindowKeyPressSub?.cancel();
     _htmlWindowFocusSub?.cancel();
@@ -1760,8 +1776,47 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     _domScannerInput?.remove();
     _domScannerInput = null;
     HardwareKeyboard.instance.removeHandler(_globalKeyHandler);
+    _scanTextController.dispose();
+    _scanTextFocusNode.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  void _startAutoReturnTimer() {
+    _autoReturnTimer?.cancel();
+    _autoReturnCountdownTimer?.cancel();
+    _autoReturnRemaining = _autoReturnSeconds;
+    _autoReturnTimer = Timer(
+      const Duration(seconds: _autoReturnSeconds),
+      _navigateHome,
+    );
+    _autoReturnCountdownTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) {
+        if (!mounted || _isNavigating) return;
+        setState(() {
+          if (_autoReturnRemaining > 0) {
+            _autoReturnRemaining--;
+          }
+        });
+      },
+    );
+  }
+
+  String _formatAutoReturn() {
+    final minutes = (_autoReturnRemaining ~/ 60).toString().padLeft(2, '0');
+    final seconds = (_autoReturnRemaining % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
+  }
+
+  void _navigateHome() {
+    if (!mounted || _isNavigating) return;
+    _isNavigating = true;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const UserIdScreen()),
+      (_) => false,
+    );
   }
 
   bool _isDuplicateHtmlKey(String key) {
@@ -1966,6 +2021,13 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
   }
 
   void _focusScannerInput({bool quiet = false}) {
+    if (_scanTextFocusNode.canRequestFocus) {
+      if (!_scanTextFocusNode.hasFocus) {
+        _scanTextFocusNode.requestFocus();
+        if (!quiet) _logScan('scanner text field focused');
+      }
+      return;
+    }
     final domFocused = _focusDomScannerInput(quiet: quiet);
     if (domFocused) return;
     if (_focusNode.canRequestFocus) {
@@ -1973,6 +2035,31 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
         _focusNode.requestFocus();
         if (!quiet) _logScan('keyboard focus fallback requested');
       }
+    }
+  }
+
+  void _handleScannerTextChanged(String value) {
+    if (_openingPrint) return;
+    _scanTextIdleTimer?.cancel();
+    _scanTextIdleTimer = Timer(const Duration(milliseconds: 550), () {
+      final captured = _scanTextController.text;
+      _scanTextController.clear();
+      _logScan('scan-input idle captured="$captured"');
+      if (captured.trim().isNotEmpty) {
+        _setScanStatus("Scanner input received. Verifying...");
+        _consumeScan(captured, source: 'scan-input-idle');
+      }
+    });
+  }
+
+  void _handleScannerSubmitted(String value) {
+    if (_openingPrint) return;
+    _scanTextIdleTimer?.cancel();
+    _scanTextController.clear();
+    _logScan('scan-input submit captured="$value"');
+    if (value.trim().isNotEmpty) {
+      _setScanStatus("Scanner input received. Verifying...");
+      _consumeScan(value, source: 'scan-input-submit');
     }
   }
 
@@ -2292,7 +2379,7 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     });
 
     if (_matchesExpectedCode(value)) {
-      _logScan('$source scan matched order ${widget.orderNumber}');
+      _logScan('$source scan matched pickup code for order ${widget.orderNumber}');
       _setScanStatus("Scanner matched. Printing receipt...");
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2309,11 +2396,13 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
       '$source scan mismatch: received="$value" expected="$_scanCode"',
     );
     _setScanStatus(
-      'Scanned "$value" does not match order $_scanCode. Please rescan.',
+      'Scanned "$value" does not match pickup code $_scanCode. Please scan this screen QR.',
     );
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Scanned code "$value" does not match this order.'),
+        content: Text(
+          'Scanned code "$value" does not match pickup code.',
+        ),
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -2324,88 +2413,52 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     final normalized = _sanitizeScan(value).toLowerCase();
     if (normalized.isEmpty) return false;
 
-    final expected = _scanCode.toLowerCase();
-    if (expected.startsWith(normalized) &&
-        normalized.length < expected.length) {
-      return true;
-    }
-
-    final expectedDigits = expected.replaceAll(RegExp(r'[^0-9]'), '');
-    if (expectedDigits.isEmpty) return false;
-    for (final candidate in _digitCandidatesForMatching(normalized)) {
-      if (candidate.isEmpty) continue;
-      if (expectedDigits.startsWith(candidate) &&
-          candidate.length < expectedDigits.length) {
-        return true;
-      }
-    }
-    return false;
+    final expected = _sanitizeScan(_scanCode).toLowerCase();
+    return expected.startsWith(normalized) &&
+        normalized.length < expected.length;
   }
 
   bool _matchesExpectedCode(String value) {
-    final normalized = value.trim().toLowerCase();
-    final expected = _scanCode;
-    final expectedNormalized = expected.toLowerCase();
-    final expectedDigits = expected.replaceAll(RegExp(r'[^0-9]'), '');
+    final normalized = _sanitizeScan(value).toLowerCase();
+    final expected = _sanitizeScan(_scanCode).toLowerCase();
+    if (normalized == expected || normalized.contains(expected)) return true;
 
-    if (normalized == expectedNormalized) return true;
-
-    for (final candidate in _digitCandidatesForMatching(normalized)) {
-      if (candidate == expectedDigits) return true;
-      final trimmedCandidate = candidate.replaceFirst(RegExp(r'^0+'), '');
-      final trimmedExpected = expectedDigits.replaceFirst(RegExp(r'^0+'), '');
-      if (trimmedCandidate.isNotEmpty && trimmedCandidate == trimmedExpected) {
-        return true;
+    final uri = Uri.tryParse(value.trim());
+    if (uri != null) {
+      for (final segment in uri.pathSegments) {
+        final s = _sanitizeScan(segment).toLowerCase();
+        if (s == expected) return true;
       }
-      if (expectedDigits.isNotEmpty &&
-          candidate.endsWith(expectedDigits) &&
-          candidate.length <= expectedDigits.length + 2) {
-        return true;
+      for (final q in uri.queryParameters.values) {
+        final s = _sanitizeScan(q).toLowerCase();
+        if (s == expected) return true;
       }
     }
 
-    final accepted = <String>{
-      'order:$expectedNormalized',
-      'order-$expectedNormalized',
-      'order_$expectedNormalized',
-      'selfx-$expectedNormalized',
-      'selfx${widget.orderNumber}',
-      'selfx-order-$expectedNormalized',
-    };
-    return accepted.contains(normalized);
+    return false;
   }
 
-  Set<String> _digitCandidatesForMatching(String value) {
-    final rawDigits = value.replaceAll(RegExp(r'[^0-9]'), '');
-    final qAsZero = value
-        .replaceAll(RegExp(r'[qQoO]'), '0')
-        .replaceAll(RegExp(r'[^0-9]'), '');
-    final candidates = <String>{
-      rawDigits,
-      qAsZero,
-      rawDigits.replaceFirst(RegExp(r'^0+'), ''),
-      qAsZero.replaceFirst(RegExp(r'^0+'), ''),
-    };
-    candidates.removeWhere((v) => v.isEmpty);
-    return candidates;
-  }
-
-  Future<void> _openPrintScreen() async {
-    if (_openingPrint) return;
+  Future<void> _openPrintScreen({bool fromRetry = false}) async {
+    if (_openingPrint || _isNavigating) return;
     if (!mounted) return;
 
     setState(() {
       _openingPrint = true;
+      _printError = null;
+      _scanStatusText =
+          fromRetry ? "Retrying print..." : "Scanner matched. Printing receipt...";
     });
 
-    _logScan('scan accepted; trying print before opening success dialog');
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Scan matched. Printing receipt...'),
-        behavior: SnackBarBehavior.floating,
-        duration: Duration(seconds: 1),
-      ),
-    );
+    if (!fromRetry) {
+      _logScan('scan accepted; trying print before opening success dialog');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Scan matched. Printing receipt...'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 1),
+        ),
+      );
+    }
 
     await Future<void>.delayed(const Duration(milliseconds: 350));
     if (!mounted) return;
@@ -2447,6 +2500,9 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
 
     if (!mounted) return;
     if (printed) {
+      _autoReturnTimer?.cancel();
+      _autoReturnCountdownTimer?.cancel();
+      _isNavigating = true;
       _setScanStatus("Print command sent successfully.");
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2455,35 +2511,38 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
           duration: Duration(seconds: 1),
         ),
       );
+
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      if (!mounted) return;
+
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => PaymentSuccessDialog(
+            cart: widget.cart,
+            orderNumber: widget.orderNumber,
+            language: "en",
+            restaurantName: widget.restaurantName,
+            orderType: widget.orderType,
+            autoPrint: false,
+            debugSource: "scan->print: pre-print success",
+          ),
+        ),
+      );
     } else {
-      _setScanStatus("Print failed. Opening success screen for retry.");
+      setState(() {
+        _openingPrint = false;
+        _printError = printError?.toString() ?? "Print failed";
+      });
+      _setScanStatus("Print failed. Tap Retry Print.");
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Print failed. Opening success screen for retry.'),
+          content: Text('Print failed. Please tap Retry Print.'),
           behavior: SnackBarBehavior.floating,
           backgroundColor: Colors.redAccent,
         ),
       );
+      _focusScannerInput();
     }
-
-    await Future<void>.delayed(const Duration(milliseconds: 350));
-    if (!mounted) return;
-
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(
-        builder: (_) => PaymentSuccessDialog(
-          cart: widget.cart,
-          orderNumber: widget.orderNumber,
-          language: "en",
-          restaurantName: widget.restaurantName,
-          orderType: widget.orderType,
-          autoPrint: !printed,
-          debugSource: printed
-              ? "scan->print: pre-print success"
-              : "scan->print: pre-print failed ($printError)",
-        ),
-      ),
-    );
   }
 
   @override
@@ -2492,42 +2551,54 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     final compact = media.size.width < 720;
     final qrSize = compact ? 180.0 : 230.0;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF6F1EA),
-      body: SafeArea(
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: () {
-            _focusScannerInput();
-          },
-          child: Focus(
-            focusNode: _focusNode,
-            autofocus: true,
-            onKeyEvent: _handleKeyEvent,
-            child: Stack(
-              children: [
-                Center(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.all(24),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 760),
-                      child: Container(
-                        padding: EdgeInsets.all(compact ? 20 : 28),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(30),
-                          border: Border.all(color: const Color(0xFFE7D9CB)),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.08),
-                              blurRadius: 26,
-                              offset: const Offset(0, 16),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) {
+        if (didPop || !mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Back is disabled on this screen"),
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 1),
+          ),
+        );
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF6F1EA),
+        body: SafeArea(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () {
+              _focusScannerInput();
+            },
+            child: Focus(
+              focusNode: _focusNode,
+              autofocus: true,
+              onKeyEvent: _handleKeyEvent,
+              child: Stack(
+                children: [
+                  Center(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(24),
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 760),
+                        child: Container(
+                          padding: EdgeInsets.all(compact ? 20 : 28),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(30),
+                            border: Border.all(color: const Color(0xFFE7D9CB)),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.08),
+                                blurRadius: 26,
+                                offset: const Offset(0, 16),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
                             Row(
                               children: [
                                 Image.asset(
@@ -2546,7 +2617,7 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
                                     borderRadius: BorderRadius.circular(999),
                                   ),
                                   child: Text(
-                                    "Order #${widget.orderNumber}",
+                                    "Pickup #${widget.orderNumber}",
                                     style: const TextStyle(
                                       fontWeight: FontWeight.w800,
                                       color: Color(0xFF22643B),
@@ -2567,12 +2638,22 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
                             ),
                             const SizedBox(height: 10),
                             Text(
-                              "Scan the QR code below to print the receipt using the same printer flow as tablet.",
+                              "Show this QR at counter for printing.",
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                 fontSize: compact ? 13.5 : 15,
                                 height: 1.5,
                                 color: Colors.black54,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              "Auto return in ${_formatAutoReturn()}",
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontSize: 12.5,
+                                color: Colors.black45,
+                                fontWeight: FontWeight.w700,
                               ),
                             ),
                             const SizedBox(height: 22),
@@ -2607,6 +2688,17 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
                                 ),
                               ),
                             ),
+                            const SizedBox(height: 10),
+                            SelectableText(
+                              _scanCode,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: compact ? 14 : 16,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.2,
+                                color: const Color(0xFF1D1D1D),
+                              ),
+                            ),
                             const SizedBox(height: 18),
                             _buildReceiptPreview(compact: compact),
                             const SizedBox(height: 16),
@@ -2634,6 +2726,105 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
+                            if (_printError != null) ...[
+                              const SizedBox(height: 10),
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFEBEE),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: const Color(0xFFFFCDD2),
+                                  ),
+                                ),
+                                child: Text(
+                                  _printError!,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: Color(0xFFB71C1C),
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 12),
+                            TextField(
+                              controller: _scanTextController,
+                              focusNode: _scanTextFocusNode,
+                              autofocus: true,
+                              autocorrect: false,
+                              enableSuggestions: false,
+                              keyboardType: TextInputType.text,
+                              textInputAction: TextInputAction.done,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.1,
+                              ),
+                              onChanged: _handleScannerTextChanged,
+                              onSubmitted: _handleScannerSubmitted,
+                              decoration: InputDecoration(
+                                hintText:
+                                    "Scanner input (auto-focus, no tap needed)",
+                                filled: true,
+                                fillColor: const Color(0xFFF7FAFC),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 12,
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFFD8E0E8),
+                                  ),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFFD8E0E8),
+                                  ),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFF22643B),
+                                    width: 2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (_printError != null) ...[
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                height: 48,
+                                child: ElevatedButton.icon(
+                                  onPressed: _openingPrint
+                                      ? null
+                                      : () => _openPrintScreen(fromRetry: true),
+                                  icon: _openingPrint
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : const Icon(Icons.print_rounded),
+                                  label: Text(
+                                    _openingPrint ? "Printing..." : "Retry Print",
+                                  ),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF9F342C),
+                                    foregroundColor: Colors.white,
+                                    elevation: 0,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 10),
                             if (_lastScan != null &&
                                 _lastScan!.trim().isNotEmpty) ...[
@@ -2652,8 +2843,9 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
                       ),
                     ),
                   ),
-                ),
-              ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),

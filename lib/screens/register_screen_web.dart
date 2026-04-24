@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/providers/restaurant_provider.dart';
 import 'package:flutter/material.dart';
@@ -41,16 +40,16 @@ class _UserIdScreenState extends State<UserIdScreen> {
           .timeout(const Duration(seconds: 8));
 
       if (!mounted) return;
-      if (restaurantProvider.restaurants.isNotEmpty) {
-        setState(() {
-          _webRestaurants
-            ..clear()
-            ..addAll(restaurantProvider.restaurants);
-          _loadingRestaurants = false;
-          _restaurantLoadError = restaurantProvider.errorMessage;
-        });
-        return;
-      }
+      final restaurants = restaurantProvider.restaurants;
+      setState(() {
+        _webRestaurants
+          ..clear()
+          ..addAll(restaurants);
+        _loadingRestaurants = false;
+        _restaurantLoadError = restaurants.isEmpty
+            ? (restaurantProvider.errorMessage ?? "Unable to load restaurants")
+            : null;
+      });
     } catch (e, stackTrace) {
       kioskLogError(
         'Web register bootstrap failed: $e',
@@ -58,9 +57,12 @@ class _UserIdScreenState extends State<UserIdScreen> {
         error: e,
         stackTrace: stackTrace,
       );
+      if (!mounted) return;
+      setState(() {
+        _loadingRestaurants = false;
+        _restaurantLoadError = "Unable to load restaurants";
+      });
     }
-
-    await _loadWebRestaurants();
   }
 
   @override
@@ -79,11 +81,7 @@ class _UserIdScreenState extends State<UserIdScreen> {
       await restaurantProvider
           .refreshRestaurants()
           .timeout(const Duration(seconds: 8));
-      final restaurants = restaurantProvider.restaurants.isNotEmpty
-          ? restaurantProvider.restaurants
-          : await KioskApi()
-                .getAllRestaurantsWeb()
-                .timeout(const Duration(seconds: 10));
+      final restaurants = restaurantProvider.restaurants;
       if (!mounted) return;
       setState(() {
         _webRestaurants
@@ -91,8 +89,8 @@ class _UserIdScreenState extends State<UserIdScreen> {
           ..addAll(restaurants);
         _loadingRestaurants = false;
         _restaurantLoadError = restaurants.isEmpty
-            ? (restaurantProvider.errorMessage ?? "No restaurants found")
-            : restaurantProvider.errorMessage;
+            ? (restaurantProvider.errorMessage ?? "Unable to load restaurants")
+            : null;
       });
     } catch (e, stackTrace) {
       kioskLogError(
@@ -149,7 +147,18 @@ class _UserIdScreenState extends State<UserIdScreen> {
       _selectedRestaurant = restaurant;
     });
 
-    await restaurantProvider.setSelectedRestaurant(restaurant);
+    unawaited(
+      restaurantProvider.setSelectedRestaurant(restaurant).catchError(
+        (Object error, StackTrace stackTrace) {
+          kioskLogError(
+            'Failed to persist selected restaurant: $error',
+            tag: 'WEB_RESTAURANTS',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        },
+      ),
+    );
 
     if (!mounted) return;
     Navigator.pushReplacement(
@@ -416,13 +425,24 @@ class _UserIdScreenState extends State<UserIdScreen> {
                                       vertical: 32,
                                     ),
                                     alignment: Alignment.center,
-                                    child: const Column(
+                                    child: Column(
                                       children: [
                                         SizedBox(
-                                          width: 24,
-                                          height: 24,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
+                                          width: 54,
+                                          height: 54,
+                                          child: Stack(
+                                            alignment: Alignment.center,
+                                            children: const [
+                                              CircularProgressIndicator(
+                                                strokeWidth: 3,
+                                                color: Color(0xFF9F342C),
+                                              ),
+                                              Icon(
+                                                Icons.restaurant_menu_rounded,
+                                                size: 24,
+                                                color: Color(0xFF9F342C),
+                                              ),
+                                            ],
                                           ),
                                         ),
                                         SizedBox(height: 14),
@@ -514,7 +534,24 @@ class _UserIdScreenState extends State<UserIdScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          CircularProgressIndicator(),
+                          SizedBox(
+                            width: 56,
+                            height: 56,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: const [
+                                CircularProgressIndicator(
+                                  strokeWidth: 3,
+                                  color: Color(0xFF9F342C),
+                                ),
+                                Icon(
+                                  Icons.restaurant_menu_rounded,
+                                  size: 24,
+                                  color: Color(0xFF9F342C),
+                                ),
+                              ],
+                            ),
+                          ),
                           SizedBox(height: 12),
                           Text("Opening menu..."),
                         ],

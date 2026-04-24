@@ -182,6 +182,24 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
 
     final double screenWidth = MediaQuery.of(context).size.width;
     final bool isTablet = screenWidth > 600;
+    const LinearGradient tabletTitleGradient = LinearGradient(
+      colors: [
+        Color(0xFFF8B355),
+        Color(0xFFDF6A33),
+        Color(0xFF9F342C),
+      ],
+      begin: Alignment.centerLeft,
+      end: Alignment.centerRight,
+    );
+    const LinearGradient mobileTitleGradient = LinearGradient(
+      colors: [
+        Color(0xFFFFC06A),
+        Color(0xFFE97D43),
+        Color(0xFFB4432D),
+      ],
+      begin: Alignment.centerLeft,
+      end: Alignment.centerRight,
+    );
 
     // ✅ TABLET → EXACTLY 2 ITEMS
     // Controller is managed in didChangeDependencies.
@@ -205,29 +223,31 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: ShaderMask(
-                  shaderCallback: (bounds) {
-                    return const LinearGradient(
-                      colors: [
-                        Color(0xFF22E6C7), // teal
-                        Color(0xFF3A7BFF), // blue
-                        Color(0xFF9B4DFF), // purple
-                      ],
-                    ).createShader(bounds);
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final double width =
+                        constraints.maxWidth > 0 ? constraints.maxWidth : 240.0;
+                    final double height = isTablet ? 40.0 : 56.0;
+                    final gradient =
+                        isTablet ? tabletTitleGradient : mobileTitleGradient;
+
+                    return Text(
+                      "Top Selling Items (Today)",
+                      maxLines: isTablet ? 1 : 2,
+                      softWrap: !isTablet,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: isTablet ? 24 : 18,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: isTablet ? 0.3 : 0.1,
+                        height: 1.1,
+                        foreground: Paint()
+                          ..shader = gradient.createShader(
+                            Rect.fromLTWH(0, 0, width, height),
+                          ),
+                      ),
+                    );
                   },
-                  child: Text(
-                    "Top Selling Items (Today)",
-                    maxLines: isTablet ? 1 : 2,
-                    softWrap: true,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: isTablet ? 24 : 18,
-                      fontWeight: FontWeight.w900,
-                      color: Colors.white, // required for ShaderMask
-                      letterSpacing: isTablet ? 0.3 : 0.1,
-                      height: 1.1,
-                    ),
-                  ),
                 ),
               ),
             ],

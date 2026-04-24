@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/background_image/background_image.dart';
@@ -20,11 +22,32 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   final PrinterService _printerService = PrinterService();
   final EpsonUSBPrinterService _usbService = EpsonUSBPrinterService();
   final TextEditingController _kioskNameCtrl = TextEditingController();
+  final TextEditingController _scannerCtrl = TextEditingController();
+  final FocusNode _scannerFocusNode = FocusNode(
+    debugLabel: "setup-scanner-test",
+  );
 
   bool isLoading = true;
   bool _savingKioskName = false;
   bool _finishing = false;
   bool _active = true;
+  bool _scannerWorking = false;
+  bool _scannerPrintRunning = false;
+  bool _scanPrintDialogOpen = false;
+  int _queuedScannerPrintJobs = 0;
+
+  Timer? _scannerIdleTimer;
+  Timer? _scannerRefocusTimer;
+  String _scannerStatus = "Scan any barcode/QR to test scanner.";
+  String? _lastScannerValue;
+
+  static const Set<String> _dummyPrintScanTokens = {
+    "DUMMYPRINT",
+    "TESTPRINT",
+    "PRINTTEST",
+    "SELFXTESTPRINT",
+    "SELFXDUMMYPRINT",
+  };
 
   String restaurantName = "Restaurant";
   String? restaurantAddress;
@@ -34,12 +57,26 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   void initState() {
     super.initState();
     _loadSettings();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusScannerField();
+    });
+    _scannerRefocusTimer = Timer.periodic(const Duration(milliseconds: 800), (
+      _,
+    ) {
+      if (!_active || !mounted) return;
+      if (_scanPrintDialogOpen) return;
+      _focusScannerField();
+    });
   }
 
   @override
   void dispose() {
     _active = false;
+    _scannerIdleTimer?.cancel();
+    _scannerRefocusTimer?.cancel();
     _kioskNameCtrl.dispose();
+    _scannerCtrl.dispose();
+    _scannerFocusNode.dispose();
     super.dispose();
   }
 
@@ -51,21 +88,20 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       final savedName = prefs.getString("kiosk_name");
       final res = await AdminApi().getSettings();
       final data = res.data ?? {};
-        final settings =
-            (data["settings"] as Map?)?.cast<String, dynamic>() ?? {};
-        final restaurant =
-            (data["restaurant"] as Map?)?.cast<String, dynamic>() ?? {};
+      final settings =
+          (data["settings"] as Map?)?.cast<String, dynamic>() ?? {};
+      final restaurant =
+          (data["restaurant"] as Map?)?.cast<String, dynamic>() ?? {};
 
-        await ReceiptPrintMode.storeFromMap(settings);
-        await ReceiptPrintMode.storeFromMap(restaurant);
+      await ReceiptPrintMode.storeFromMap(settings);
+      await ReceiptPrintMode.storeFromMap(restaurant);
 
       if (!mounted) return;
       setState(() {
         _settingsData = settings;
         restaurantName = restaurant["name"] ?? "Restaurant";
         restaurantAddress = restaurant["address"]?.toString();
-        _kioskNameCtrl.text =
-            (savedName != null && savedName.trim().isNotEmpty)
+        _kioskNameCtrl.text = (savedName != null && savedName.trim().isNotEmpty)
             ? savedName.trim()
             : "";
         isLoading = false;
@@ -78,10 +114,10 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
         final raw = res.data ?? {};
         final restaurant =
             (raw["restaurant"] as Map?)?.cast<String, dynamic>() ??
-            (raw as Map?)?.cast<String, dynamic>() ??
-            {};
-        final kioskSettings = (raw["kiosk_settings"] as Map?)
-            ?.cast<String, dynamic>();
+                (raw as Map?)?.cast<String, dynamic>() ??
+                {};
+        final kioskSettings =
+            (raw["kiosk_settings"] as Map?)?.cast<String, dynamic>();
         final branch = (raw["branch"] as Map?)?.cast<String, dynamic>();
 
         await ReceiptPrintMode.storeFromMap(kioskSettings);
@@ -93,8 +129,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
         }
         final branchId = mergedSettings["branch_id"] ?? branch?["id"];
         if (branchId != null) mergedSettings["branch_id"] = branchId;
-        final restaurantId =
-            mergedSettings["restaurant_id"] ??
+        final restaurantId = mergedSettings["restaurant_id"] ??
             restaurant["restaurant_id"] ??
             restaurant["id"];
         if (restaurantId != null) {
@@ -103,15 +138,14 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
 
         if (!mounted) return;
         setState(() {
-          _settingsData = mergedSettings.isNotEmpty
-              ? mergedSettings
-              : kioskSettings;
+          _settingsData =
+              mergedSettings.isNotEmpty ? mergedSettings : kioskSettings;
           restaurantName = restaurant["name"] ?? "Restaurant";
           restaurantAddress = restaurant["address"]?.toString();
           _kioskNameCtrl.text =
               (savedName != null && savedName.trim().isNotEmpty)
-              ? savedName.trim()
-              : "";
+                  ? savedName.trim()
+                  : "";
           isLoading = false;
         });
       } catch (_) {
@@ -167,7 +201,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     } catch (_) {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString("kiosk_name", name);
-      _showSnackBar("Saved locally.", Color(0xFF1B8E3E));
+      _showSnackBar("Saved locally.", const Color(0xFF1B8E3E));
       OrderUtils.notifyInfoUpdated();
     } finally {
       if (mounted) setState(() => _savingKioskName = false);
@@ -202,6 +236,100 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       } else {
         _showSnackBar(e.message ?? e.toString(), Colors.red);
       }
+    } catch (e) {
+      _showSnackBar(e.toString(), Colors.red);
+    }
+  }
+
+  Future<void> _setupUsbPrinter() async {
+    try {
+      final printers = await _printerService.getUsbPrinters();
+      if (printers.isEmpty) {
+        _showSnackBar("No USB printer found", Colors.red);
+        return;
+      }
+
+      Map<String, dynamic>? selectedPrinter;
+      if (printers.length == 1) {
+        selectedPrinter = printers.first;
+      } else {
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: const Text("Select USB Printer"),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: printers.length,
+                  itemBuilder: (_, index) {
+                    final printer = printers[index];
+                    final printerName =
+                        printer["name"]?.toString().trim().isNotEmpty == true
+                            ? printer["name"].toString().trim()
+                            : (printer["productName"]
+                                        ?.toString()
+                                        .trim()
+                                        .isNotEmpty ==
+                                    true
+                                ? printer["productName"].toString().trim()
+                                : "USB Printer");
+                    return ListTile(
+                      leading: const Icon(Icons.print_rounded),
+                      title: Text(printerName),
+                      subtitle: Text(
+                        "VID ${printer["vendorId"] ?? "-"}  PID ${printer["productId"] ?? "-"}",
+                      ),
+                      onTap: () {
+                        selectedPrinter = printer;
+                        Navigator.of(dialogContext).pop();
+                      },
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text("Cancel"),
+                ),
+              ],
+            );
+          },
+        );
+      }
+
+      if (selectedPrinter == null) return;
+
+      try {
+        await _printerService.saveSelectedUsbPrinter(selectedPrinter!);
+      } on PlatformException catch (e) {
+        if (e.code != "USB_PERMISSION_REQUIRED") rethrow;
+        final requested =
+            await _usbService.requestUsbPermissionWithUi(selectedPrinter!);
+        if (!requested) {
+          _showSnackBar("USB permission denied", Colors.red);
+          return;
+        }
+        await Future.delayed(const Duration(milliseconds: 600));
+        await _printerService.saveSelectedUsbPrinter(selectedPrinter!);
+      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString("printer_type", "usb");
+
+      final printerName =
+          selectedPrinter!["name"]?.toString().trim().isNotEmpty == true
+              ? selectedPrinter!["name"].toString().trim()
+              : (selectedPrinter!["productName"]
+                          ?.toString()
+                          .trim()
+                          .isNotEmpty ==
+                      true
+                  ? selectedPrinter!["productName"].toString().trim()
+                  : "USB Printer");
+      _showSnackBar("Printer configured: $printerName", Colors.green);
     } catch (e) {
       _showSnackBar(e.toString(), Colors.red);
     }
@@ -244,10 +372,151 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     }
   }
 
+  String _normalizeScannerInput(String raw) {
+    return raw
+        .replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), '')
+        .replaceAll(RegExp(r'\s+'), '')
+        .trim();
+  }
+
+  String _normalizeDummyPrintToken(String raw) {
+    return raw.replaceAll(RegExp(r'[^A-Za-z0-9]'), '').toUpperCase();
+  }
+
+  bool _isDummyPrintScan(String value) {
+    final token = _normalizeDummyPrintToken(value);
+    if (_dummyPrintScanTokens.contains(token)) return true;
+    for (final expected in _dummyPrintScanTokens) {
+      if (token.startsWith(expected) || token.endsWith(expected)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> _showScanPrintConfirmDialog(String scannedValue) async {
+    if (!mounted || _scanPrintDialogOpen) return;
+    _scannerFocusNode.unfocus();
+    _scanPrintDialogOpen = true;
+    final shouldPrint = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text("Scanner Confirmation"),
+          content: Text(
+            'Scanned value:\n"$scannedValue"\n\nRun test print now?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text("Cancel"),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text("Print Test"),
+            ),
+          ],
+        );
+      },
+    );
+    _scanPrintDialogOpen = false;
+    if (shouldPrint == true) {
+      await _runScannerTriggeredTestPrint(scannedValue);
+    } else if (mounted) {
+      setState(() {
+        _scannerStatus = 'Scan confirmed. Print skipped.';
+      });
+    }
+    _focusScannerField();
+  }
+
+  Future<void> _runScannerTriggeredTestPrint(String scannedValue) async {
+    if (!mounted) return;
+    setState(() {
+      _queuedScannerPrintJobs++;
+      _scannerStatus =
+          'Dummy scan "$scannedValue" matched. Queued prints: $_queuedScannerPrintJobs';
+    });
+    if (_scannerPrintRunning) return;
+    setState(() {
+      _scannerPrintRunning = true;
+    });
+    try {
+      while (mounted && _queuedScannerPrintJobs > 0) {
+        setState(() {
+          _queuedScannerPrintJobs--;
+          _scannerStatus =
+              'Printing test receipt... Remaining queue: $_queuedScannerPrintJobs';
+        });
+        await _runTestPrint();
+        if (!mounted) return;
+        setState(() {
+          _scannerStatus = _queuedScannerPrintJobs > 0
+              ? 'Print sent. Next queued print starting... ($_queuedScannerPrintJobs left)'
+              : 'All queued scan prints sent successfully.';
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _scannerPrintRunning = false;
+        });
+      }
+    }
+  }
+
+  void _consumeScannerInput(String raw) {
+    final value = _normalizeScannerInput(raw);
+    if (value.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _scannerWorking = false;
+        _scannerStatus = "No scanner data captured. Try scanning again.";
+      });
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _scannerWorking = true;
+      _lastScannerValue = value;
+      _scannerStatus = 'Scanner working. Last read: "$value"';
+    });
+
+    if (_isDummyPrintScan(value)) {
+      unawaited(_runScannerTriggeredTestPrint(value));
+      return;
+    }
+    unawaited(_showScanPrintConfirmDialog(value));
+  }
+
+  void _handleScannerChanged(String value) {
+    _scannerIdleTimer?.cancel();
+    _scannerIdleTimer = Timer(const Duration(milliseconds: 450), () {
+      final captured = _scannerCtrl.text;
+      _scannerCtrl.clear();
+      _consumeScannerInput(captured);
+    });
+  }
+
+  void _handleScannerSubmitted(String value) {
+    _scannerIdleTimer?.cancel();
+    _scannerCtrl.clear();
+    _consumeScannerInput(value);
+  }
+
   void _showSnackBar(String msg, Color color) {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
+  }
+
+  void _focusScannerField() {
+    if (!_scannerFocusNode.canRequestFocus) return;
+    if (_scannerFocusNode.hasFocus) return;
+    _scannerFocusNode.requestFocus();
   }
 
   /* ================= UI ================= */
@@ -279,10 +548,12 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
           style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
       ),
-
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
-          : ListView(
+          : GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: _focusScannerField,
+              child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
               children: [
                 _sectionTitle("Restaurant Info"),
@@ -311,9 +582,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                     ],
                   ),
                 ),
-
                 const SizedBox(height: 24),
-
                 _sectionTitle("Device Setup"),
                 _card(
                   child: Column(
@@ -374,16 +643,14 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                     ],
                   ),
                 ),
-
                 const SizedBox(height: 24),
-
-                _sectionTitle("Printer Setup"),
+                _sectionTitle("Scanner Setup"),
                 _card(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        "Test Printer",
+                        "Test Scanner",
                         style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w700,
@@ -391,10 +658,98 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        "Print a sample receipt to verify the printer is connected correctly.",
+                        "Tap the field below and scan a barcode/QR. If value appears, scanner is connected.\n"
+                        "Any scan will ask confirmation for dummy test print.\n"
+                        "For direct auto-print queue, scan dummy code: SELFX_TEST_PRINT\n"
+                        "Each dummy scan = one print.",
+                        style: TextStyle(color: Colors.grey.shade600),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _scannerCtrl,
+                        focusNode: _scannerFocusNode,
+                        onChanged: _handleScannerChanged,
+                        onSubmitted: _handleScannerSubmitted,
+                        textInputAction: TextInputAction.done,
+                        decoration: const InputDecoration(
+                          hintText: "Scan here",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _scannerWorking
+                              ? const Color(0xFFE7F6EB)
+                              : const Color(0xFFFFF5E7),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: _scannerWorking
+                                ? const Color(0xFF1B8E3E)
+                                : const Color(0xFFB8832E),
+                          ),
+                        ),
+                        child: Text(
+                          _scannerStatus,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: _scannerWorking
+                                ? const Color(0xFF1B8E3E)
+                                : const Color(0xFF9A6A1D),
+                          ),
+                        ),
+                      ),
+                      if (_lastScannerValue != null &&
+                          _lastScannerValue!.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          "Last scanner value: $_lastScannerValue",
+                          style: TextStyle(
+                            color: Colors.grey.shade700,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                _sectionTitle("Printer Setup"),
+                _card(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Configure + Test Printer",
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        "First select/connect USB printer, then run test print.",
                         style: TextStyle(color: Colors.grey.shade600),
                       ),
                       const SizedBox(height: 14),
+                      SizedBox(
+                        height: 48,
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: _setupUsbPrinter,
+                          icon: const Icon(Icons.usb_rounded),
+                          label: const Text(
+                            "Setup USB Printer",
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
                       SizedBox(
                         height: 48,
                         width: double.infinity,
@@ -419,9 +774,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                     ],
                   ),
                 ),
-
                 const SizedBox(height: 32),
-
                 SizedBox(
                   height: 54,
                   child: ElevatedButton(
@@ -452,6 +805,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                   ),
                 ),
               ],
+            ),
             ),
     );
   }

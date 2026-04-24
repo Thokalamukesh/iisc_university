@@ -7,6 +7,18 @@ import android.os.Handler
 import android.os.Looper
 
 class BootReceiver : BroadcastReceiver() {
+    private fun isAutoStartEnabled(context: Context): Boolean {
+        return try {
+            val prefs = context.getSharedPreferences(
+                "FlutterSharedPreferences",
+                Context.MODE_PRIVATE
+            )
+            prefs.getBoolean("flutter.auto_start_on_boot", false)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun shouldLaunch(action: String?): Boolean {
         return action == Intent.ACTION_BOOT_COMPLETED ||
             action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
@@ -18,6 +30,7 @@ class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (!shouldLaunch(intent.action)) return
+        if (!isAutoStartEnabled(context)) return
 
         val pendingResult = goAsync()
         Handler(Looper.getMainLooper()).postDelayed({

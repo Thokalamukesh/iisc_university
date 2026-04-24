@@ -1,14 +1,12 @@
 import 'dart:async';
 import 'dart:ui';
 import 'dart:math';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'home_page2.dart';
 import 'cart_page.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class MainNavigation extends StatefulWidget {
   final String orderType;
@@ -39,12 +37,6 @@ class _MainNavigationState extends State<MainNavigation>
       _productsRaw,
       _cartIdSet(),
     );
-    if (kDebugMode) {
-      final ids = recommendedProducts
-          .map((e) => e["id"])
-          .where((e) => e != null)
-          .toList();
-    }
   }
 
   String _normalizeKey(String k) =>
@@ -796,6 +788,7 @@ class _MainNavigationState extends State<MainNavigation>
                   onClearCart: _clearAllPopup,
                   onCartIconRect: (rect) => _cartIconRect = rect,
                   isActive: currentIndex == 0,
+                  showBottomBar: false,
                   onAddToCart: (
                     int id,
                     String name,
@@ -864,183 +857,166 @@ class _MainNavigationState extends State<MainNavigation>
           ),
         ],
       ),
+      bottomNavigationBar: currentIndex == 0 ? _bottomBar() : null,
     );
   }
 
   // ================= BOTTOM BAR =================
   Widget _bottomBar() {
-    // 1. Determine device type for dynamic scaling
-    final double screenWidth = MediaQuery.of(context).size.width;
-    final bool isTablet = screenWidth > 600;
+    final bool isTablet = MediaQuery.of(context).size.width > 600;
+    final int totalItems = cart.fold<int>(
+      0,
+      (sum, item) => sum + _asInt(item["qty"]),
+    );
+    final int totalPrice = cart.fold<int>(
+      0,
+      (sum, item) => sum + (_asInt(item["qty"]) * _asInt(item["price"])),
+    );
+    final bool hasItems = totalItems > 0;
 
     return Container(
-      // Tablet gets more height to look proportional to the screen
-      height: isTablet ? 70 : 70,
-      padding: EdgeInsets.symmetric(horizontal: isTablet ? 20 : 14),
+      height: isTablet ? 86 : 78,
+      padding: EdgeInsets.symmetric(
+        horizontal: isTablet ? 16 : 12,
+        vertical: isTablet ? 12 : 10,
+      ),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(30),
-          topRight: Radius.circular(30),
-        ),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+        border: Border.all(color: const Color(0xFFEAEFF5)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 14,
+            offset: const Offset(0, -2),
+          ),
+        ],
       ),
       child: Row(
         children: [
-          // ==========================================
-          // 1. CLEAR ALL SECTION (Left Aligned)
-          // ==========================================
+          SizedBox(
+            width: isTablet ? 122 : 96,
+            child: OutlinedButton.icon(
+              onPressed: hasItems ? _clearAllPopup : _showEmptyCartDialog,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF9F342C),
+                side: const BorderSide(color: Color(0xFFDFCCC3)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                padding: EdgeInsets.symmetric(
+                  horizontal: isTablet ? 10 : 8,
+                  vertical: isTablet ? 10 : 8,
+                ),
+              ),
+              icon: Icon(
+                Icons.delete_outline_rounded,
+                size: isTablet ? 18 : 16,
+              ),
+              label: Text(
+                "CLEAR",
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: isTablet ? 13 : 11,
+                  letterSpacing: 0.4,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
           Expanded(
-            flex: isTablet ? 2 : 3,
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: OutlinedButton(
-                onPressed: _clearAllPopup, // Using your existing logic
-                style: OutlinedButton.styleFrom(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: isTablet ? 8 : 8,
-                    vertical: isTablet ? 10 : 8,
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: isTablet ? 12 : 8),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "$totalItems items",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: const Color(0xFF646F7D),
+                      fontWeight: FontWeight.w700,
+                      fontSize: isTablet ? 13 : 11,
+                    ),
                   ),
-                  side: BorderSide(
-                    color: const Color.fromARGB(255, 239, 138, 80),
-                    width: 1,
+                  Text(
+                    "₹$totalPrice",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.black,
+                      fontWeight: FontWeight.w900,
+                      fontSize: isTablet ? 26 : 19,
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          SizedBox(
+            width: isTablet ? 188 : 148,
+            child: ScaleTransition(
+              scale: _viewCartScale,
+              child: ElevatedButton(
+                onPressed: () {
+                  if (!hasItems) {
+                    _showEmptyCartDialog();
+                    return;
+                  }
+                  setState(() => currentIndex = 1);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF2F9D48),
+                  foregroundColor: Colors.white,
+                  elevation: 2,
+                  shadowColor: const Color(0xFF2F9D48).withOpacity(0.28),
+                  padding: EdgeInsets.symmetric(
+                    vertical: isTablet ? 12 : 10,
+                    horizontal: 10,
                   ),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(15),
+                    borderRadius: BorderRadius.circular(14),
                   ),
                 ),
                 child: FittedBox(
                   fit: BoxFit.scaleDown,
                   child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(
-                        Icons.delete_sweep_outlined,
-                        size: isTablet ? 13 : 10,
-                        color: const Color.fromARGB(255, 239, 138, 80),
+                      ScaleTransition(
+                        scale: _cartBounceAnim,
+                        child: Builder(
+                          builder: (ctx) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (!mounted) return;
+                              final render = ctx.findRenderObject();
+                              if (render is! RenderBox || !render.attached) {
+                                return;
+                              }
+                              _cartIconRect =
+                                  render.localToGlobal(Offset.zero) &
+                                      render.size;
+                            });
+                            return Icon(
+                              Icons.shopping_cart_rounded,
+                              size: isTablet ? 20 : 16,
+                            );
+                          },
+                        ),
                       ),
-                      const SizedBox(width: 4),
+                      const SizedBox(width: 6),
                       Text(
-                        "CLEAR",
+                        "VIEW CART",
                         style: TextStyle(
                           fontWeight: FontWeight.w900,
-                          fontSize: isTablet ? 10 : 9,
-                          letterSpacing: .5,
-                          color: const Color.fromARGB(255, 239, 138, 80),
+                          fontSize: isTablet ? 15 : 11,
+                          letterSpacing: 0.4,
                         ),
                       ),
                     ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          // ==========================================
-          // 2. CENTER PRICE INFO (Value Display)
-          // ==========================================
-          Expanded(
-            flex: 3,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  "$totalItems Items",
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: isTablet ? 16 : 12,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  "₹$totalPrice",
-                  style: TextStyle(
-                    fontSize: isTablet ? 28 : 18,
-                    fontWeight: FontWeight.w900,
-                    color: Colors.black,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // ==========================================
-          // 3. VIEW CART BUTTON (Action Section)
-          // ==========================================
-          Expanded(
-            flex: isTablet ? 4 : 5,
-            child: Align(
-              alignment: Alignment.center,
-              child: ScaleTransition(
-                scale: _viewCartScale, // Using your existing scale animation
-                child: Container(
-                  width: double.infinity,
-                  // Limits button width on huge tablets so it stays elegant
-                  constraints: BoxConstraints(maxWidth: isTablet ? 160 : 110),
-                  child: ElevatedButton(
-                    onPressed: () {
-                      if (totalItems == 0) {
-                        _showEmptyCartDialog(); // Existing logic
-                        return;
-                      }
-                      // Smoothly switch to cart view
-                      setState(() => currentIndex = 1);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green.shade700,
-                      foregroundColor: Colors.white,
-                      elevation: 4,
-                      shadowColor: Colors.green.withOpacity(0.3),
-                      padding: EdgeInsets.symmetric(
-                        vertical: isTablet ? 10 : 8,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                    ),
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          ScaleTransition(
-                            scale: _cartBounceAnim, // Existing bounce logic
-                            child: Builder(
-                              builder: (ctx) {
-                                WidgetsBinding.instance.addPostFrameCallback(
-                                  (_) {
-                                    if (!mounted) return;
-                                    final render = ctx.findRenderObject();
-                                    if (render is! RenderBox ||
-                                        !render.attached) {
-                                      return;
-                                    }
-                                    final rect =
-                                        render.localToGlobal(Offset.zero) &
-                                            render.size;
-                                    _cartIconRect = rect;
-                                  },
-                                );
-                                return Icon(
-                                  Icons.shopping_cart,
-                                  size: isTablet ? 22 : 16,
-                                  color: Colors.white,
-                                );
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            "VIEW CART",
-                            style: TextStyle(
-                              fontWeight: FontWeight.w900,
-                              fontSize: isTablet ? 16 : 11,
-                              letterSpacing: 0.6,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
                   ),
                 ),
               ),

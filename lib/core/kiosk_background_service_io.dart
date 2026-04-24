@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter_background_service/flutter_background_service.dart';
-import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const Duration _heartbeatCheckInterval = Duration(seconds: 15);
@@ -10,14 +8,16 @@ const Duration _heartbeatTimeout = Duration(seconds: 60);
 const Duration _startupGracePeriod = Duration(seconds: 20);
 const Duration _openAppCooldown = Duration(seconds: 45);
 const Duration _initialBootOpenDelay = Duration(seconds: 12);
+const Duration _manualExitDefaultCooldown = Duration(minutes: 10);
+const bool _kioskAutoStartEnabled = false;
 
 Future<void> initializeKioskBackgroundService() async {
   final service = FlutterBackgroundService();
   await service.configure(
     androidConfiguration: AndroidConfiguration(
       onStart: kioskBackgroundOnStart,
-      autoStart: true,
-      autoStartOnBoot: true,
+      autoStart: _kioskAutoStartEnabled,
+      autoStartOnBoot: _kioskAutoStartEnabled,
       isForegroundMode: true,
       initialNotificationTitle: 'SELFX Kiosk',
       initialNotificationContent: 'Kiosk service running',
@@ -28,6 +28,10 @@ Future<void> initializeKioskBackgroundService() async {
     ),
   );
   await service.startService();
+}
+
+void stopKioskBackgroundService() {
+  FlutterBackgroundService().invoke("stopService");
 }
 
 void sendUiHeartbeat() {
@@ -50,6 +54,13 @@ void reportUiCrash(Object error, StackTrace stack) {
   });
 }
 
+void sendUiManualExit({Duration cooldown = _manualExitDefaultCooldown}) {
+  FlutterBackgroundService().invoke("manual_exit", {
+    "ts": DateTime.now().millisecondsSinceEpoch,
+    "cooldownMs": cooldown.inMilliseconds,
+  });
+}
+
 @pragma('vm:entry-point')
 void kioskBackgroundOnStart(ServiceInstance service) async {
   if (service is AndroidServiceInstance) {
@@ -60,18 +71,19 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
     );
   }
 
-  bool allowAutoOpen = true;
+  bool allowAutoOpen = false;
   Future<void> refreshAllowAutoOpen() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final restaurantId = prefs.getString("restaurant_id");
-      final autoStartOnBoot = prefs.getBool("auto_start_on_boot") ?? true;
+      final autoStartOnBoot = prefs.getBool("auto_start_on_boot") ?? false;
       allowAutoOpen =
+          _kioskAutoStartEnabled &&
           autoStartOnBoot &&
           restaurantId != null &&
           restaurantId.trim().isNotEmpty;
     } catch (_) {
-      allowAutoOpen = true;
+      allowAutoOpen = false;
     }
   }
   await refreshAllowAutoOpen();
@@ -79,6 +91,7 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
   final int serviceStart = DateTime.now().millisecondsSinceEpoch;
   int lastHeartbeat = serviceStart;
   int lastOpenApp = 0;
+  int suppressAutoOpenUntil = 0;
   bool uiReady = false;
 
   service.on("ui_heartbeat").listen((event) {
@@ -92,6 +105,7 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
 
   service.on("ui_ready").listen((event) {
     uiReady = true;
+    suppressAutoOpenUntil = 0;
     final ts = event?["ts"];
     if (ts is int) {
       lastHeartbeat = ts;
@@ -105,8 +119,20 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
     lastHeartbeat = 0;
   });
 
+  service.on("manual_exit").listen((event) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final dynamic rawCooldown = event?["cooldownMs"];
+    final cooldownMs = rawCooldown is num
+        ? rawCooldown.toInt()
+        : _manualExitDefaultCooldown.inMilliseconds;
+    suppressAutoOpenUntil = now + cooldownMs;
+    lastHeartbeat = now;
+    lastOpenApp = now;
+  });
+
   Timer(_initialBootOpenDelay, () async {
     await refreshAllowAutoOpen();
+    if (DateTime.now().millisecondsSinceEpoch < suppressAutoOpenUntil) return;
     if (!allowAutoOpen || uiReady) return;
     if (service is AndroidServiceInstance) {
       await service.openApp();
@@ -129,11 +155,13 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
     final gapMs = now - lastHeartbeat;
     final elapsed = now - serviceStart;
     final cooldownMs = now - lastOpenApp;
+    final manualExitSuppressed = now < suppressAutoOpenUntil;
     final heartbeatExpired = gapMs >= _heartbeatTimeout.inMilliseconds;
     final startupGracePassed = elapsed >= _startupGracePeriod.inMilliseconds;
     final cooldownPassed = cooldownMs >= _openAppCooldown.inMilliseconds;
 
     if (allowAutoOpen &&
+        !manualExitSuppressed &&
         heartbeatExpired &&
         cooldownPassed &&
         (uiReady || startupGracePassed)) {

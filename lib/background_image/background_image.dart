@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/kiosk_api.dart';
+import '../printer/register_kiosk.dart';
+import '../printer/printer_s.dart';
 import '../screens/register_screen.dart';
 import '../screens/main_navigation.dart';
 import '../screens/pin_screen.dart';
@@ -25,6 +27,8 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     with WidgetsBindingObserver {
   Timer? _sliderTimer;
   Timer? _adminTapResetTimer;
+  Timer? _scanIdleTimer;
+  Timer? _scanFocusKeepAliveTimer;
   VoidCallback? _maintenanceListener;
   VoidCallback? _mediaRefreshListener;
   int _mediaRefreshKey = 0;
@@ -36,8 +40,14 @@ class _WelcomeScreenState extends State<WelcomeScreen>
   bool _openingOrder = false;
   bool _loadingRestaurant = false;
   bool _webMenuRedirected = false;
+  bool _scanPrintInProgress = false;
   VoidCallback? _onlineListener;
   int _adminTapCount = 0;
+  String _lastConsumedScan = "";
+  DateTime _lastConsumedScanAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  final TextEditingController _scannerCtrl = TextEditingController();
+  final FocusNode _scannerFocusNode = FocusNode(debugLabel: "welcome-scanner");
 
   String restaurantName = "Start Your Order";
   List<String> banners = [];
@@ -56,7 +66,10 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     if (!mounted) return;
 
     Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const UserIdScreen()),
+      MaterialPageRoute(
+        builder: (_) =>
+            kIsWeb ? const UserIdScreen() : const RegisterKioskScreen(),
+      ),
       (_) => false,
     );
   }
@@ -92,6 +105,21 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       _mediaRefreshListener = _handleMediaRefreshTick;
       KioskMemoryService.instance.mediaRefreshTick.addListener(
         _mediaRefreshListener!,
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _focusScannerInput();
+      });
+      _scanFocusKeepAliveTimer = Timer.periodic(
+        const Duration(milliseconds: 900),
+        (_) {
+          if (!mounted ||
+              _scanPrintInProgress ||
+              _openingOrder ||
+              _openingAdmin) {
+            return;
+          }
+          _focusScannerInput();
+        },
       );
     }
   }
@@ -270,6 +298,220 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     setState(() {});
   }
 
+  void _focusScannerInput() {
+    if (kIsWeb) return;
+    if (_scannerFocusNode.canRequestFocus && !_scannerFocusNode.hasFocus) {
+      _scannerFocusNode.requestFocus();
+    }
+  }
+
+  String _normalizeScanInput(String raw) {
+    return raw
+        .replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), '')
+        .replaceAll(RegExp(r'\s+'), '')
+        .trim();
+  }
+
+  void _handleScannerChanged(String value) {
+    _scanIdleTimer?.cancel();
+    _scanIdleTimer = Timer(const Duration(milliseconds: 450), () {
+      final captured = _scannerCtrl.text;
+      _scannerCtrl.clear();
+      unawaited(_consumeScannerValue(captured));
+    });
+  }
+
+  void _handleScannerSubmitted(String value) {
+    _scanIdleTimer?.cancel();
+    _scannerCtrl.clear();
+    unawaited(_consumeScannerValue(value));
+  }
+
+  int? _extractOrderIdFromScan(String value) {
+    final normalized = _normalizeScanInput(value).toLowerCase();
+    if (normalized.isEmpty) return null;
+
+    final direct = int.tryParse(normalized);
+    if (direct != null && direct > 0) return direct;
+
+    final prefixed = RegExp(r'^(order[:\-_]|selfx[:\-_]?order[:\-_]?)(\d+)$')
+        .firstMatch(normalized);
+    if (prefixed != null) {
+      final prefixedValue = int.tryParse(prefixed.group(2) ?? "");
+      if (prefixedValue != null && prefixedValue > 0) return prefixedValue;
+    }
+
+    final isTaggedScan =
+        normalized.contains("order") || normalized.contains("selfx");
+    if (isTaggedScan) {
+      final anyDigits = RegExp(r'(\d{1,12})').allMatches(normalized);
+      if (anyDigits.isNotEmpty) {
+        final candidate = anyDigits.last.group(1);
+        final parsed = int.tryParse(candidate ?? "");
+        if (parsed != null && parsed > 0) return parsed;
+      }
+    }
+    return null;
+  }
+
+  bool _isPaidStatus(dynamic status) {
+    if (status == true) return true;
+    if (status is num) return status == 1;
+    final s = status?.toString().trim().toLowerCase() ?? "";
+    if (s.isEmpty) return false;
+    if (s.contains("cancel") ||
+        s.contains("refund") ||
+        s.contains("failed") ||
+        s.contains("void") ||
+        s.contains("unpaid") ||
+        s.contains("pending")) {
+      return false;
+    }
+    return s.contains("paid") ||
+        s.contains("completed") ||
+        s.contains("success") ||
+        s.contains("successful") ||
+        s.contains("captured") ||
+        s.contains("authorized");
+  }
+
+  bool _containsPaidState(dynamic value, int depth) {
+    if (value == null || depth <= 0) return false;
+    if (value is Map) {
+      for (final key in const [
+        "status",
+        "payment_status",
+        "paymentStatus",
+        "order_status",
+        "orderStatus",
+        "state",
+        "payment_state",
+        "paymentState",
+        "paid",
+        "is_paid",
+        "isPaid",
+        "success",
+        "is_success",
+        "isSuccess",
+        "result",
+        "message",
+      ]) {
+        if (value.containsKey(key) && _isPaidStatus(value[key])) {
+          return true;
+        }
+      }
+      for (final nestedKey in const [
+        "data",
+        "order",
+        "payment",
+        "response",
+        "result",
+        "payload",
+      ]) {
+        if (value.containsKey(nestedKey) &&
+            _containsPaidState(value[nestedKey], depth - 1)) {
+          return true;
+        }
+      }
+      for (final entry in value.entries) {
+        if (_containsPaidState(entry.value, depth - 1)) {
+          return true;
+        }
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        if (_containsPaidState(item, depth - 1)) return true;
+      }
+    } else if (_isPaidStatus(value)) {
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _consumeScannerValue(String raw) async {
+    if (!mounted || kIsWeb) return;
+    if (_scanPrintInProgress || _openingOrder || _openingAdmin || isLoading) {
+      return;
+    }
+    final value = _normalizeScanInput(raw);
+    if (value.isEmpty) {
+      _focusScannerInput();
+      return;
+    }
+
+    final now = DateTime.now();
+    if (_lastConsumedScan == value &&
+        now.difference(_lastConsumedScanAt) <
+            const Duration(milliseconds: 900)) {
+      _focusScannerInput();
+      return;
+    }
+    _lastConsumedScan = value;
+    _lastConsumedScanAt = now;
+
+    final orderId = _extractOrderIdFromScan(value);
+    if (orderId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Invalid scan "$value". Please scan order QR.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      _focusScannerInput();
+      return;
+    }
+
+    _scanPrintInProgress = true;
+    try {
+      final paymentRes = await KioskApi().checkPayment(orderId);
+      final isPaid = _containsPaidState(paymentRes.data, 5);
+      if (!isPaid) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("Order #$orderId is not paid yet."),
+              behavior: SnackBarBehavior.floating,
+              backgroundColor: Colors.orange.shade800,
+            ),
+          );
+        }
+        return;
+      }
+
+      await PrinterService().printOrder(
+        orderId: orderId,
+        cartItems: const [],
+        restaurantName: restaurantName,
+        paymentMode: "PAID",
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Order #$orderId printed successfully."),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: Colors.green.shade700,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Print failed for order #$orderId: $e"),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
+    } finally {
+      _scanPrintInProgress = false;
+      _focusScannerInput();
+    }
+  }
+
   @override
   void dispose() {
     if (!kIsWeb) {
@@ -289,7 +531,11 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       );
     }
     _adminTapResetTimer?.cancel();
+    _scanIdleTimer?.cancel();
+    _scanFocusKeepAliveTimer?.cancel();
     _sliderTimer?.cancel();
+    _scannerCtrl.dispose();
+    _scannerFocusNode.dispose();
     super.dispose();
   }
 
@@ -330,6 +576,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
         onPointerDown: (_) {
           if (_openingAdmin) return;
           _handleHiddenAdminTap();
+          _focusScannerInput();
         },
         child: Stack(
           children: [
@@ -429,6 +676,31 @@ class _WelcomeScreenState extends State<WelcomeScreen>
               right: isTablet ? 80 : 20,
               child: _orderPanel(isTablet),
             ),
+            if (!kIsWeb)
+              Positioned(
+                left: 0,
+                top: 0,
+                width: 1,
+                height: 1,
+                child: TextField(
+                  controller: _scannerCtrl,
+                  focusNode: _scannerFocusNode,
+                  autofocus: true,
+                  onChanged: _handleScannerChanged,
+                  onSubmitted: _handleScannerSubmitted,
+                  enableInteractiveSelection: false,
+                  showCursor: false,
+                  decoration: const InputDecoration(
+                    isCollapsed: true,
+                    border: InputBorder.none,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                  style: const TextStyle(
+                    fontSize: 1,
+                    color: Colors.transparent,
+                  ),
+                ),
+              ),
           ],
         ),
       ),

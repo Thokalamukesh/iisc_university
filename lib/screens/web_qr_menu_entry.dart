@@ -328,10 +328,40 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
+      return Scaffold(
         backgroundColor: Colors.white,
         body: Center(
-          child: CircularProgressIndicator(),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: const [
+              SizedBox(
+                width: 64,
+                height: 64,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    CircularProgressIndicator(
+                      strokeWidth: 3,
+                      color: Color(0xFF9F342C),
+                    ),
+                    Icon(
+                      Icons.restaurant_menu_rounded,
+                      size: 28,
+                      color: Color(0xFF9F342C),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(height: 12),
+              Text(
+                "Preparing menu...",
+                style: TextStyle(
+                  color: Colors.black54,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }

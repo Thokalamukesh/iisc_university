@@ -21,8 +21,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-final GlobalKey<NavigatorState> rootNavigatorKey =
-    GlobalKey<NavigatorState>();
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   await runZonedGuarded<Future<void>>(() async {
@@ -59,8 +58,8 @@ Future<void> main() async {
     final Widget initialHome = kIsWeb
         ? _resolveInitialWebHome()
         : (restaurantId == null || restaurantId.trim().isEmpty)
-        ? const UserIdScreen()
-        : (setupDone ? const WelcomeScreen() : const RegisterKioskScreen());
+            ? const RegisterKioskScreen()
+            : (setupDone ? const WelcomeScreen() : const RegisterKioskScreen());
 
     runApp(
       ChangeNotifierProvider(
@@ -133,6 +132,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   Timer? _heartbeatTimer;
   Timer? _serviceHeartbeatTimer;
   bool _tickersEnabled = true;
+  bool _isExitingFromRemoteBack = false;
   late final KioskWatchdog _watchdog;
   final FocusNode _appFocusNode = FocusNode(debugLabel: 'app-root');
 
@@ -223,6 +223,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               _resetIdleTimer();
               _watchdog.reportUserActivity();
               KioskMemoryService.instance.reportUserActivity();
+              if (_isRemoteBackKey(event)) {
+                unawaited(_handleSystemBackPress());
+                return KeyEventResult.handled;
+              }
               return KeyEventResult.ignored;
             },
             child: Listener(
@@ -253,11 +257,18 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         return ValueListenableBuilder<bool>(
           valueListenable: ConnectivityService.instance.isOnline,
           builder: (context, online, _) {
-            return Stack(
-              children: [
-                content,
-                if (!online) _buildNoInternetOverlay(),
-              ],
+            return PopScope(
+              canPop: false,
+              onPopInvoked: (didPop) {
+                if (didPop) return;
+                _handleSystemBackPress();
+              },
+              child: Stack(
+                children: [
+                  content,
+                  if (!online) _buildNoInternetOverlay(),
+                ],
+              ),
             );
           },
         );
@@ -307,8 +318,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                     children: [
                       Container(
                         padding: const EdgeInsets.all(22),
-                        decoration: BoxDecoration(
-                          gradient: const LinearGradient(
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
                             colors: [Color(0xFFFFEBEE), Color(0xFFFFCDD2)],
                             begin: Alignment.topLeft,
                             end: Alignment.bottomRight,
@@ -433,6 +444,41 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     } else {
       _resetIdleTimer();
     }
+  }
+
+  Future<void> _handleSystemBackPress() async {
+    _resetIdleTimer();
+    _watchdog.reportUserActivity();
+    KioskMemoryService.instance.reportUserActivity();
+
+    final nav = rootNavigatorKey.currentState;
+    if (nav != null && nav.canPop()) {
+      nav.pop();
+      return;
+    }
+
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      if (_isExitingFromRemoteBack) return;
+      _isExitingFromRemoteBack = true;
+      sendUiManualExit(cooldown: const Duration(minutes: 10));
+      stopKioskBackgroundService();
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        await SystemNavigator.pop();
+      } finally {
+        _isExitingFromRemoteBack = false;
+      }
+    }
+  }
+
+  bool _isRemoteBackKey(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return false;
+    }
+    final key = event.logicalKey;
+    return key == LogicalKeyboardKey.goBack ||
+        key == LogicalKeyboardKey.escape ||
+        key == LogicalKeyboardKey.browserBack;
   }
 
   @override

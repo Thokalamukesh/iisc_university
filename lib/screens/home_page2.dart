@@ -91,6 +91,7 @@ class HomePage2 extends StatefulWidget {
   final List<Map<String, dynamic>> cart;
   final int Function(int productId) getQtyForProduct;
   final bool isActive;
+  final bool showBottomBar;
 
   const HomePage2({
     super.key,
@@ -103,6 +104,7 @@ class HomePage2 extends StatefulWidget {
     required this.cart,
     required this.getQtyForProduct,
     required this.isActive,
+    this.showBottomBar = true,
   });
 
   @override
@@ -1131,8 +1133,42 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     if (isLoading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
+      return Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 74,
+                height: 74,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: const [
+                    CircularProgressIndicator(
+                      strokeWidth: 3.2,
+                      color: Color(0xFF9F342C),
+                    ),
+                    Icon(
+                      Icons.restaurant_menu_rounded,
+                      size: 32,
+                      color: Color(0xFF9F342C),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                "Preparing menu...",
+                style: TextStyle(
+                  color: Color(0xFF6E6E6E),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
       );
     }
     if (hasError) {
@@ -1258,7 +1294,9 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
           if (_showScrollToTop)
             Positioned(
               right: 18,
-              bottom: _bottomBarBaseHeight(isTablet) + 14,
+              bottom:
+                  (widget.showBottomBar ? _bottomBarBaseHeight(isTablet) : 0) +
+                      14,
               child: FloatingActionButton(
                 onPressed: () {
                   if (!scrollCtrl.hasClients) return;
@@ -1291,30 +1329,57 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
 
     return Container(
       // Updated width logic: 140 for Tablet, 100 for Mobile
-      width: isTablet ? 170 : 100,
+      width: isTablet ? 170 : 86,
       color: const Color.fromARGB(255, 120, 33, 27),
       child: Stack(
         children: [
           Column(
             children: [
-              const SizedBox(height: 20),
-              // Adjusted logo height for mobile
-              InkWell(
-                onTap: () {
-                  Navigator.pushAndRemoveUntil(
-                    context,
-                    MaterialPageRoute(builder: (_) => const WelcomeScreen()),
-                    (_) => false,
-                  );
-                },
-                onLongPress: kDebugMode ? _showRecommendedDebug : null,
-                child: Image.asset(
-                  "assets/self.png",
-                  height: isTablet ? 50 : 40,
+              SizedBox(height: isTablet ? 16 : 12),
+              Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: isTablet ? 8 : 4,
+                  vertical: isTablet ? 8 : 6,
+                ),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  child: _loadingProducts
+                      ? Icon(
+                          Icons.restaurant_menu_rounded,
+                          key: const ValueKey("categories-loading"),
+                          color: Colors.white,
+                          size: isTablet ? 24 : 20,
+                        )
+                      : Text(
+                          key: const ValueKey("categories-title"),
+                          "Categories",
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color:
+                                kIsWeb ? const Color(0xFFFFE2C8) : Colors.white,
+                            fontWeight:
+                                kIsWeb ? FontWeight.w900 : FontWeight.w800,
+                            letterSpacing: kIsWeb ? 0.8 : 0.5,
+                            fontSize: isTablet
+                                ? (kIsWeb ? 16 : 15)
+                                : (kIsWeb ? 12.5 : 12),
+                            height: 1.1,
+                            shadows: kIsWeb
+                                ? const [
+                                    Shadow(
+                                      color: Color(0x60000000),
+                                      blurRadius: 6,
+                                      offset: Offset(0, 1),
+                                    ),
+                                  ]
+                                : null,
+                          ),
+                        ),
                 ),
               ),
-              const SizedBox(height: 10),
-
+              SizedBox(height: 10),
               Expanded(
                 child: Column(
                   children: [
@@ -1561,7 +1626,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final double width = MediaQuery.of(context).size.width;
     final bool isTablet = width > 600;
     final bool sectionMode = selectedIndex == 0;
-    final double leftBarWidth = isTablet ? 170 : 100;
+    final double leftBarWidth = isTablet ? 170 : 86;
     final double rightAreaWidth = (width - leftBarWidth).clamp(320.0, width);
     final double gridPadding = 24; // SliverPadding left + right
     final double crossAxisSpacing = isTablet ? 17 : 12;
@@ -1573,8 +1638,10 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final int imageCacheWidth = (itemWidth * dpr).round().clamp(1, 4096);
     final int imageCacheHeight = (imageHeight * dpr).round().clamp(1, 4096);
     final double bottomInset = MediaQuery.of(context).padding.bottom;
-    final double bottomBarHeight = _bottomBarBaseHeight(isTablet);
-    final double bottomSpace = bottomBarHeight + bottomInset + 16;
+    final double bottomBarHeight =
+        widget.showBottomBar ? _bottomBarBaseHeight(isTablet) : 0;
+    final double bottomSpace =
+        bottomBarHeight + (widget.showBottomBar ? bottomInset : 0) + 16;
     return Column(
       children: [
         Padding(padding: const EdgeInsets.all(12), child: _buildSearchRow()),
@@ -1652,7 +1719,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                     const SizedBox.shrink(),
                 ],
               ),
-              Align(alignment: Alignment.bottomCenter, child: _bottomBar()),
+              if (widget.showBottomBar)
+                Align(alignment: Alignment.bottomCenter, child: _bottomBar()),
             ],
           ),
         ),
@@ -1758,7 +1826,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   }
 
   double _bottomBarBaseHeight(bool isTablet) {
-    return isTablet ? 100 : 132;
+    return isTablet ? 100 : 124;
   }
 
   Widget _bottomBar() {
@@ -1784,14 +1852,14 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(10),
-            topRight: Radius.circular(10),
+            topLeft: Radius.circular(18),
+            topRight: Radius.circular(18),
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.89),
-              blurRadius: 16,
-              offset: const Offset(0, 6),
+              color: Colors.black.withOpacity(0.18),
+              blurRadius: 14,
+              offset: const Offset(0, -2),
             ),
           ],
         ),
@@ -1845,8 +1913,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                     children: [
                       Expanded(
                         child: SizedBox(
-                          height: 42,
-                          child: OutlinedButton(
+                          height: 44,
+                          child: OutlinedButton.icon(
                             onPressed: hasItems
                                 ? widget.onClearCart
                                 : _showEmptyCartDialog,
@@ -1867,10 +1935,19 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                 borderRadius: BorderRadius.circular(12),
                               ),
                             ),
-                            child: const Icon(
+                            icon: const Icon(
                               Icons.delete_outline_rounded,
                               size: 18,
                               color: Color.fromARGB(255, 120, 33, 27),
+                            ),
+                            label: const Text(
+                              "CLEAR",
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.4,
+                                color: Color.fromARGB(255, 120, 33, 27),
+                              ),
                             ),
                           ),
                         ),
@@ -1879,7 +1956,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                       Expanded(
                         flex: 2,
                         child: SizedBox(
-                          height: 42,
+                          height: 44,
                           child:
                               _buildViewCartButton(hasItems, false, cartGreen),
                         ),
@@ -2160,67 +2237,68 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   }
 
   Widget _buildSearchRow() {
+    final bool isTablet = MediaQuery.of(context).size.width > 600;
     return Row(
       children: [
-        Flexible(
-          flex: 3,
+        Expanded(
           child: Container(
-            height: 44,
+            height: isTablet ? 46 : 44,
             decoration: BoxDecoration(
-              color: Colors.grey.shade200,
-              borderRadius: BorderRadius.circular(30),
+              color: const Color(0xFFF4F5F7),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFFE2E5EA)),
             ),
-            child: Padding(
-              padding: const EdgeInsets.only(right: 20),
-              child: TextField(
-                controller: searchCtrl,
-                onChanged: (v) => setState(() => searchQuery = v.toLowerCase()),
-                decoration: InputDecoration(
-                  border: InputBorder.none,
-                  prefixIcon: const Icon(Icons.search),
-                  hintText: "Search items...",
-                  suffixIcon: searchCtrl.text.isEmpty
-                      ? null
-                      : IconButton(
-                          icon: const Icon(Icons.close_rounded),
-                          onPressed: () {
-                            searchCtrl.clear();
-                            setState(() => searchQuery = "");
-                          },
-                        ),
+            child: TextField(
+              controller: searchCtrl,
+              textInputAction: TextInputAction.search,
+              onChanged: (v) => setState(() => searchQuery = v.toLowerCase()),
+              decoration: InputDecoration(
+                border: InputBorder.none,
+                prefixIcon: const Icon(Icons.search, size: 22),
+                hintText: "Search menu items...",
+                hintStyle: const TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF8B8F96),
                 ),
+                contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                suffixIcon: searchCtrl.text.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close_rounded),
+                        onPressed: () {
+                          searchCtrl.clear();
+                          setState(() => searchQuery = "");
+                        },
+                      ),
               ),
             ),
           ),
         ),
-        const SizedBox(width: 20),
-        OutlinedButton(
-          onPressed: () {
-            _showRestartDialog(context);
-          },
-          style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xFF9F342C),
-            side: const BorderSide(
-              color: Color.fromARGB(255, 0, 0, 0),
-            ),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(26),
-            ),
-          ),
-          child: const Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.home_outlined,
-                size: 18,
-                color: Color.fromARGB(255, 0, 0, 0),
+        const SizedBox(width: 10),
+        SizedBox(
+          width: isTablet ? 46 : 44,
+          height: isTablet ? 46 : 44,
+          child: Tooltip(
+            message: "Restart order",
+            child: OutlinedButton(
+              onLongPress: kDebugMode ? _showRecommendedDebug : null,
+              onPressed: () {
+                _showRestartDialog(context);
+              },
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF9F342C),
+                side: const BorderSide(color: Color(0xFFE2E5EA)),
+                padding: EdgeInsets.zero,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
               ),
-              SizedBox(width: 6),
-              Text(
-                "Restart",
-                style: TextStyle(color: Color.fromARGB(255, 0, 0, 0)),
+              child: const Icon(
+                Icons.home_rounded,
+                size: 22,
+                color: Color.fromARGB(255, 235, 177, 60),
               ),
-            ],
+            ),
           ),
         ),
       ],

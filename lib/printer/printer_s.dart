@@ -604,7 +604,14 @@ class PrinterService {
   Future<PrinterType?> _getPrinterType() async {
     final prefs = await SharedPreferences.getInstance();
     final type = prefs.getString("printer_type");
-    if (type == null) return null;
+    if (type == null || type.trim().isEmpty) {
+      final selectedUsb = await _getSelectedUsbPrinter();
+      if (selectedUsb != null) {
+        await prefs.setString("printer_type", PrinterType.usb.name);
+        return PrinterType.usb;
+      }
+      return null;
+    }
 
     return PrinterType.values.firstWhere(
       (e) => e.name == type,

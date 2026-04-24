@@ -32,7 +32,7 @@ require_command flutter
 require_command aws
 require_env AWS_S3_BUCKET
 
-BUILD_ARGS=(build web --release)
+BUILD_ARGS=(build web --release --pwa-strategy=none)
 
 if [[ -n "${FLUTTER_BASE_HREF:-}" ]]; then
   BUILD_ARGS+=(--base-href "$FLUTTER_BASE_HREF")
@@ -53,31 +53,92 @@ fi
 echo "🚀 Building Flutter web..."
 flutter "${BUILD_ARGS[@]}"
 
-echo "☁️ Uploading assets to S3..."
+NO_CACHE_FILES=(
+  "index.html"
+  "main.dart.js"
+  "flutter.js"
+  "flutter_bootstrap.js"
+  "flutter_service_worker.js"
+  "version.json"
+  "manifest.json"
+  "assets/AssetManifest.json"
+  "assets/AssetManifest.bin"
+  "assets/AssetManifest.bin.json"
+  "assets/FontManifest.json"
+  "assets/NOTICES"
+)
+
+echo "☁️ Uploading cacheable assets to S3..."
 aws_cmd s3 sync build/web "s3://${AWS_S3_BUCKET}" \
   --delete \
   --exclude "index.html" \
+  --exclude "main.dart.js" \
+  --exclude "flutter.js" \
+  --exclude "flutter_bootstrap.js" \
+  --exclude "flutter_service_worker.js" \
+  --exclude "version.json" \
+  --exclude "manifest.json" \
+  --exclude "assets/AssetManifest.json" \
+  --exclude "assets/AssetManifest.bin" \
+  --exclude "assets/AssetManifest.bin.json" \
+  --exclude "assets/FontManifest.json" \
+  --exclude "assets/NOTICES" \
   --cache-control "public,max-age=31536000,immutable"
 
-echo "📄 Uploading index.html (no cache)..."
+echo "📄 Uploading runtime entry files (no cache)..."
 aws_cmd s3 cp build/web/index.html "s3://${AWS_S3_BUCKET}/index.html" \
   --content-type "text/html; charset=utf-8" \
   --cache-control "public,max-age=0,no-cache,no-store,must-revalidate"
 
-if [[ -f "build/web/flutter_service_worker.js" ]]; then
-  echo "🔄 Uploading service worker..."
-  aws_cmd s3 cp \
-    build/web/flutter_service_worker.js \
-    "s3://${AWS_S3_BUCKET}/flutter_service_worker.js" \
-    --content-type "application/javascript; charset=utf-8" \
-    --cache-control "public,max-age=0,no-cache,no-store,must-revalidate"
-fi
+for file in "${NO_CACHE_FILES[@]}"; do
+  if [[ "$file" == "index.html" ]]; then
+    continue
+  fi
+  if [[ -f "build/web/${file}" ]]; then
+    case "$file" in
+      *.js)
+        aws_cmd s3 cp \
+          "build/web/${file}" \
+          "s3://${AWS_S3_BUCKET}/${file}" \
+          --content-type "application/javascript; charset=utf-8" \
+          --cache-control "public,max-age=0,no-cache,no-store,must-revalidate"
+        ;;
+      *.json)
+        aws_cmd s3 cp \
+          "build/web/${file}" \
+          "s3://${AWS_S3_BUCKET}/${file}" \
+          --content-type "application/json; charset=utf-8" \
+          --cache-control "public,max-age=0,no-cache,no-store,must-revalidate"
+        ;;
+      *)
+        aws_cmd s3 cp \
+          "build/web/${file}" \
+          "s3://${AWS_S3_BUCKET}/${file}" \
+          --cache-control "public,max-age=0,no-cache,no-store,must-revalidate"
+        ;;
+    esac
+  else
+    # Remove stale runtime files when current build doesn't generate them
+    # (for example flutter_service_worker.js with --pwa-strategy=none).
+    aws_cmd s3 rm "s3://${AWS_S3_BUCKET}/${file}" >/dev/null 2>&1 || true
+  fi
+done
 
 if [[ -n "${CLOUDFRONT_DISTRIBUTION_ID:-}" ]]; then
   echo "⚡ Invalidating CloudFront..."
-  aws_cmd cloudfront create-invalidation \
+  invalidation_id="$(
+    aws_cmd cloudfront create-invalidation \
+      --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+      --paths "/*" \
+      --query 'Invalidation.Id' \
+      --output text
+  )"
+
+  echo "⏳ Waiting for CloudFront invalidation ${invalidation_id} to complete..."
+  aws_cmd cloudfront wait invalidation-completed \
     --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-    --paths "/*"
+    --id "$invalidation_id"
+  echo "✅ CloudFront invalidation completed."
 fi
 
 echo "✅ Deployment completed successfully!"

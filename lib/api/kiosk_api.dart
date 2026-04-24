@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:flutter/foundation.dart';
@@ -6,6 +8,12 @@ import 'dio_client.dart';
 import 'web_api_config.dart';
 
 class KioskApi {
+  static const String _webRestaurantsCacheKey = "web_restaurants_cache";
+  static const bool _allowCrossOriginOnLocalhost = bool.fromEnvironment(
+    "SELFX_WEB_ALLOW_CROSS_ORIGIN_ON_LOCALHOST",
+    defaultValue: false,
+  );
+
   // =========================================================
   // RESTAURANT + KIOSK SETTINGS
   // =========================================================
@@ -29,39 +37,81 @@ class KioskApi {
       ),
     );
 
-    final configuredUrl = WebApiConfig.allRestaurantsUrl;
-    kioskLog(
-      'Loading web restaurants from $configuredUrl',
-      tag: 'WEB_RESTAURANTS',
-    );
-    final initial = await dio.get(configuredUrl);
+    final candidates = _restaurantEndpointCandidates();
+    for (final endpoint in candidates) {
+      try {
+        kioskLog(
+          'Loading web restaurants from $endpoint',
+          tag: 'WEB_RESTAURANTS',
+        );
+        final initial = await dio.get(endpoint);
+        final statusCode = initial.statusCode ?? 0;
+        if (statusCode >= 400) {
+          kioskLog(
+            'Endpoint $endpoint returned $statusCode; trying next',
+            tag: 'WEB_RESTAURANTS',
+          );
+          continue;
+        }
 
-    final direct = _extractRestaurantList(initial.data);
-    if (direct.isNotEmpty) {
-      kioskLog(
-        'Loaded ${direct.length} restaurants directly from JSON',
-        tag: 'WEB_RESTAURANTS',
-      );
-      return direct;
+        final direct = _extractRestaurantList(initial.data);
+        if (direct.isNotEmpty) {
+          await _cacheRestaurants(direct);
+          kioskLog(
+            'Loaded ${direct.length} restaurants directly from JSON',
+            tag: 'WEB_RESTAURANTS',
+          );
+          return direct;
+        }
+
+        final fallbackUrl = _deriveRestaurantApiUrl(
+          configuredUrl: endpoint,
+          responseData: initial.data,
+        );
+        if (fallbackUrl == null || fallbackUrl == endpoint) continue;
+
+        kioskLog(
+          'Falling back to restaurant API $fallbackUrl',
+          tag: 'WEB_RESTAURANTS',
+        );
+        final fallback = await dio.get(fallbackUrl);
+        final fallbackStatus = fallback.statusCode ?? 0;
+        if (fallbackStatus >= 400) {
+          kioskLog(
+            'Fallback $fallbackUrl returned $fallbackStatus',
+            tag: 'WEB_RESTAURANTS',
+          );
+          continue;
+        }
+        final list = _extractRestaurantList(fallback.data);
+        if (list.isNotEmpty) {
+          await _cacheRestaurants(list);
+          kioskLog(
+            'Loaded ${list.length} restaurants from fallback JSON',
+            tag: 'WEB_RESTAURANTS',
+          );
+          return list;
+        }
+      } catch (e, stackTrace) {
+        kioskLogError(
+          'Restaurant endpoint failed [$endpoint]: $e',
+          tag: 'WEB_RESTAURANTS',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
     }
 
-    final fallbackUrl = _deriveRestaurantApiUrl(
-      configuredUrl: configuredUrl,
-      responseData: initial.data,
-    );
-    if (fallbackUrl == null || fallbackUrl == configuredUrl) return const [];
+    final cached = await _readCachedRestaurants();
+    if (cached.isNotEmpty) {
+      kioskLog(
+        'Using ${cached.length} cached restaurants',
+        tag: 'WEB_RESTAURANTS',
+      );
+      return cached;
+    }
 
-    kioskLog(
-      'Falling back to restaurant API $fallbackUrl',
-      tag: 'WEB_RESTAURANTS',
-    );
-    final fallback = await dio.get(fallbackUrl);
-    final list = _extractRestaurantList(fallback.data);
-    kioskLog(
-      'Loaded ${list.length} restaurants from fallback JSON',
-      tag: 'WEB_RESTAURANTS',
-    );
-    return list;
+    return const [];
   }
 
   List<Map<String, dynamic>> _extractRestaurantList(dynamic raw) {
@@ -96,13 +146,110 @@ class KioskApi {
     return configuredUri.resolve(path).toString();
   }
 
+  List<String> _restaurantEndpointCandidates() {
+    final seen = <String>{};
+    final candidates = <String>[];
+    final webBaseUri = Uri.base;
+    final restrictCrossOrigin =
+        _isLocalDevHost(webBaseUri.host) && !_allowCrossOriginOnLocalhost;
+
+    void addCandidate(
+      String? raw, {
+      bool allowCrossOrigin = true,
+    }) {
+      final value = raw?.trim();
+      if (value == null || value.isEmpty) return;
+      final parsed = Uri.tryParse(value);
+      if (parsed == null) return;
+      final uri = parsed.hasScheme ? parsed : webBaseUri.resolve(value);
+      if (!uri.hasScheme || !uri.hasAuthority) return;
+      if (!allowCrossOrigin && !_isSameOrigin(uri, webBaseUri)) return;
+      final normalized = uri.toString();
+      if (seen.add(normalized)) {
+        candidates.add(normalized);
+      }
+    }
+
+    if (restrictCrossOrigin) {
+      addCandidate("/api/all-restaurants", allowCrossOrigin: false);
+      addCandidate("api/all-restaurants", allowCrossOrigin: false);
+      addCandidate(WebApiConfig.allRestaurantsUrl, allowCrossOrigin: false);
+      final localConfigured = Uri.tryParse(WebApiConfig.baseUrl);
+      if (localConfigured != null &&
+          localConfigured.hasScheme &&
+          localConfigured.hasAuthority) {
+        addCandidate(
+          localConfigured.resolve("all-restaurants").toString(),
+          allowCrossOrigin: false,
+        );
+      }
+      kioskLog(
+        'Running on localhost; using same-origin restaurant endpoints only '
+        '(set SELFX_WEB_ALLOW_CROSS_ORIGIN_ON_LOCALHOST=true to override).',
+        tag: 'WEB_RESTAURANTS',
+      );
+      return candidates;
+    }
+
+    addCandidate(WebApiConfig.allRestaurantsUrl);
+    final baseUri = Uri.tryParse(WebApiConfig.baseUrl);
+    if (baseUri != null && baseUri.hasScheme && baseUri.hasAuthority) {
+      addCandidate(baseUri.resolve("all-restaurants").toString());
+    }
+    addCandidate("/api/all-restaurants");
+    addCandidate("api/all-restaurants");
+
+    return candidates;
+  }
+
+  bool _isLocalDevHost(String host) {
+    final normalized = host.trim().toLowerCase();
+    return normalized == "localhost" ||
+        normalized == "127.0.0.1" ||
+        normalized == "::1" ||
+        normalized == "[::1]";
+  }
+
+  bool _isSameOrigin(Uri a, Uri b) {
+    return a.scheme.toLowerCase() == b.scheme.toLowerCase() &&
+        a.host.toLowerCase() == b.host.toLowerCase() &&
+        _effectivePort(a) == _effectivePort(b);
+  }
+
+  int _effectivePort(Uri uri) {
+    if (uri.hasPort) return uri.port;
+    if (uri.scheme == "https") return 443;
+    if (uri.scheme == "http") return 80;
+    return -1;
+  }
+
+  Future<void> _cacheRestaurants(List<Map<String, dynamic>> restaurants) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_webRestaurantsCacheKey, jsonEncode(restaurants));
+    } catch (_) {}
+  }
+
+  Future<List<Map<String, dynamic>>> _readCachedRestaurants() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_webRestaurantsCacheKey);
+      if (raw == null || raw.trim().isEmpty) return const [];
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .whereType<Map>()
+          .map((item) => item.map((key, value) => MapEntry("$key", value)))
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
   // =========================================================
   // PRODUCTS
   // =========================================================
   Future<Response> getProducts() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString("auth_token"); // or access_token
-
     final dio = await DioClient.getAuthedDio();
     final res = await dio.get("kiosks/getProducts");
     return res;

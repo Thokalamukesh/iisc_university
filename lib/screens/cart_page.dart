@@ -400,36 +400,13 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
         toolbarHeight: isTablet ? 100 : 80,
         backgroundColor: kGreen,
         elevation: 0,
-        leadingWidth: isTablet ? 160 : 120,
-        leading: Padding(
-          padding: const EdgeInsets.only(left: 6),
-          child: Row(
-            mainAxisSize: MainAxisSize.max,
-            children: [
-              IconButton(
-                icon: Icon(
-                  Icons.arrow_back_ios,
-                  color: Colors.white,
-                  size: isTablet ? 30 : 24,
-                ),
-                onPressed: widget.onBack,
-              ),
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: SizedBox(
-                    width: isTablet ? 96 : 72,
-                    height: isTablet ? 46 : 36,
-                    child: Image.asset(
-                      "assets/self.png",
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
-                  ),
-                ),
-              ),
-            ],
+        leading: IconButton(
+          icon: Icon(
+            Icons.arrow_back_ios,
+            color: Colors.white,
+            size: isTablet ? 30 : 24,
           ),
+          onPressed: widget.onBack,
         ),
         title: FittedBox(
           fit: BoxFit.scaleDown,
@@ -587,8 +564,6 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
   }
 
   Widget _tableHeader(bool isTablet) {
-    final double dpr = MediaQuery.of(context).devicePixelRatio;
-    final int imagePx = ((isTablet ? 70 : 34) * dpr).round();
     return Container(
       padding: EdgeInsets.symmetric(
         vertical: 12,
