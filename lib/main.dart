@@ -4,8 +4,10 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
+import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:api_selfxo_project/screens/register_screen.dart';
 import 'package:api_selfxo_project/screens/web_qr_menu_entry.dart';
 import 'package:api_selfxo_project/background_image/background_image.dart';
@@ -22,6 +24,46 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
+final GlobalKey<ScaffoldMessengerState> rootScaffoldMessengerKey =
+    GlobalKey<ScaffoldMessengerState>();
+final AppRouteObserver appRouteObserver = AppRouteObserver();
+
+class AppRouteObserver extends NavigatorObserver {
+  final ValueNotifier<String> currentRouteHint = ValueNotifier<String>('unknown');
+
+  void _updateCurrent(Route<dynamic>? route) {
+    if (route == null) {
+      currentRouteHint.value = 'unknown';
+      return;
+    }
+    final routeName = route.settings.name?.trim();
+    if (routeName != null && routeName.isNotEmpty) {
+      currentRouteHint.value = routeName;
+      return;
+    }
+    currentRouteHint.value = '${route.settings}|${route.toString()}';
+  }
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _updateCurrent(route);
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    _updateCurrent(newRoute);
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _updateCurrent(previousRoute);
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _updateCurrent(previousRoute);
+  }
+}
 
 Future<void> main() async {
   await runZonedGuarded<Future<void>>(() async {
@@ -135,10 +177,21 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   bool _isExitingFromRemoteBack = false;
   late final KioskWatchdog _watchdog;
   final FocusNode _appFocusNode = FocusNode(debugLabel: 'app-root');
+  final StringBuffer _globalScanBuffer = StringBuffer();
+  Timer? _globalScanIdleTimer;
+  bool _globalScanBusy = false;
+  String _lastGlobalScan = '';
+  DateTime _lastGlobalScanAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   static const bool _enableHeartbeatLogs = false;
 
   static const Duration _idleTimeout = Duration(minutes: 3);
+  static const Duration _globalScanDebounceWindow = Duration(
+    milliseconds: 1200,
+  );
+  static const Duration _globalScanIdleFlushDelay = Duration(
+    milliseconds: 480,
+  );
 
   @override
   void initState() {
@@ -201,6 +254,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     _idleTimer?.cancel();
     _heartbeatTimer?.cancel();
     _serviceHeartbeatTimer?.cancel();
+    _globalScanIdleTimer?.cancel();
     _watchdog.stop();
     KioskMemoryService.instance.stop();
     WidgetsBinding.instance.removeObserver(this);
@@ -212,6 +266,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: rootNavigatorKey,
+      scaffoldMessengerKey: rootScaffoldMessengerKey,
+      navigatorObservers: [appRouteObserver],
       debugShowCheckedModeBanner: false,
       builder: (context, child) {
         final content = TickerMode(
@@ -225,6 +281,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               KioskMemoryService.instance.reportUserActivity();
               if (_isRemoteBackKey(event)) {
                 unawaited(_handleSystemBackPress());
+                return KeyEventResult.handled;
+              }
+              if (_handleGlobalPaymentScanKey(event)) {
                 return KeyEventResult.handled;
               }
               return KeyEventResult.ignored;
@@ -479,6 +538,268 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     return key == LogicalKeyboardKey.goBack ||
         key == LogicalKeyboardKey.escape ||
         key == LogicalKeyboardKey.browserBack;
+  }
+
+  bool _handleGlobalPaymentScanKey(KeyEvent event) {
+    if (kIsWeb || event is! KeyDownEvent) return false;
+    if (_globalScanBusy) return false;
+    if (!_isGlobalScannerEnabledForCurrentRoute()) return false;
+    if (_isAnyTextInputFocused()) return false;
+
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter ||
+        event.logicalKey == LogicalKeyboardKey.tab) {
+      _flushGlobalScanBuffer(trigger: 'enter');
+      return true;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.backspace) {
+      if (_globalScanBuffer.isNotEmpty) {
+        final cur = _globalScanBuffer.toString();
+        _globalScanBuffer
+          ..clear()
+          ..write(cur.substring(0, cur.length - 1));
+      }
+      _scheduleGlobalScanIdleFlush();
+      return _globalScanBuffer.isNotEmpty;
+    }
+
+    final character = event.character;
+    if (character != null &&
+        character.isNotEmpty &&
+        !_isControlCharacter(character)) {
+      _globalScanBuffer.write(character);
+      _scheduleGlobalScanIdleFlush();
+      return true;
+    }
+
+    return false;
+  }
+
+  bool _isControlCharacter(String value) {
+    final code = value.codeUnitAt(0);
+    return code < 32 || code == 127;
+  }
+
+  void _scheduleGlobalScanIdleFlush() {
+    _globalScanIdleTimer?.cancel();
+    _globalScanIdleTimer = Timer(_globalScanIdleFlushDelay, () {
+      _flushGlobalScanBuffer(trigger: 'idle');
+    });
+  }
+
+  void _flushGlobalScanBuffer({required String trigger}) {
+    _globalScanIdleTimer?.cancel();
+    final captured = _globalScanBuffer.toString();
+    _globalScanBuffer.clear();
+
+    final value = _sanitizeScan(captured);
+    if (value.isEmpty) return;
+
+    final orderId = _extractOrderIdFromPaymentQr(value);
+    if (orderId == null) return;
+
+    final now = DateTime.now();
+    if (_lastGlobalScan == value &&
+        now.difference(_lastGlobalScanAt) < _globalScanDebounceWindow) {
+      return;
+    }
+    _lastGlobalScan = value;
+    _lastGlobalScanAt = now;
+
+    unawaited(
+      _processGlobalPaymentScan(
+        orderId: orderId,
+        source: trigger,
+        rawValue: value,
+      ),
+    );
+  }
+
+  String _sanitizeScan(String raw) {
+    return raw
+        .replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), '')
+        .replaceAll(RegExp(r'\s+'), '')
+        .trim();
+  }
+
+  int? _extractOrderIdFromPaymentQr(String value) {
+    final normalized = value.toUpperCase();
+    final match = RegExp(r'PRINT[_\-:]?ORDER[_\-:]?(\d{1,12})').firstMatch(
+      normalized,
+    );
+    final id = int.tryParse(match?.group(1) ?? '');
+    if (id == null || id <= 0) return null;
+    return id;
+  }
+
+  bool _isAnyTextInputFocused() {
+    final focus = FocusManager.instance.primaryFocus;
+    final ctx = focus?.context;
+    if (ctx == null) return false;
+    if (ctx.widget is EditableText) return true;
+    return ctx.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  bool _isGlobalScannerEnabledForCurrentRoute() {
+    final routeHint = appRouteObserver.currentRouteHint.value.toLowerCase();
+    if (routeHint.trim().isEmpty || routeHint == 'unknown') {
+      return true;
+    }
+
+    const blockedHints = <String>[
+      'registerkioskscreen',
+      'register_screen',
+      'registerscreen',
+      'userid',
+      'userscreen',
+      'pinscreen',
+      'admin',
+      'dashboard',
+      'settings',
+      'payment_screen',
+      'paymentscreendialog',
+      'pickupqrscreen',
+      'splashscreen',
+    ];
+
+    for (final blocked in blockedHints) {
+      if (routeHint.contains(blocked)) return false;
+    }
+    return true;
+  }
+
+  Future<void> _processGlobalPaymentScan({
+    required int orderId,
+    required String source,
+    required String rawValue,
+  }) async {
+    if (_globalScanBusy) return;
+    _globalScanBusy = true;
+    _showGlobalScanSnack(
+      'Checking payment for order #$orderId...',
+      background: Colors.blueGrey.shade700,
+      duration: const Duration(milliseconds: 900),
+    );
+    try {
+      final paymentRes = await KioskApi().checkPayment(orderId);
+      final isPaid = _containsPaidState(paymentRes.data, 5);
+      if (!isPaid) {
+        _showGlobalScanSnack(
+          'Order #$orderId is not paid yet.',
+          background: Colors.orange.shade800,
+        );
+        return;
+      }
+
+      await PaymentSuccessDialog.printReceiptUsingTabletFlow(
+        cart: const [],
+        orderNumber: orderId,
+      );
+
+      _showGlobalScanSnack(
+        'Order #$orderId printed successfully.',
+        background: Colors.green.shade700,
+      );
+    } catch (e) {
+      _showGlobalScanSnack(
+        'Print failed for order #$orderId ($source): $e',
+        background: Colors.red.shade700,
+        duration: const Duration(seconds: 2),
+      );
+    } finally {
+      _globalScanBusy = false;
+    }
+  }
+
+  bool _containsPaidState(dynamic value, int depth) {
+    if (value == null || depth <= 0) return false;
+    if (value is Map) {
+      for (final key in const [
+        'status',
+        'payment_status',
+        'paymentStatus',
+        'order_status',
+        'orderStatus',
+        'state',
+        'payment_state',
+        'paymentState',
+        'paid',
+        'is_paid',
+        'isPaid',
+        'success',
+        'is_success',
+        'isSuccess',
+        'result',
+        'message',
+      ]) {
+        if (value.containsKey(key) && _isPaidStatus(value[key])) {
+          return true;
+        }
+      }
+      for (final nestedKey in const [
+        'data',
+        'order',
+        'payment',
+        'response',
+        'result',
+        'payload',
+      ]) {
+        if (value.containsKey(nestedKey) &&
+            _containsPaidState(value[nestedKey], depth - 1)) {
+          return true;
+        }
+      }
+      for (final entry in value.entries) {
+        if (_containsPaidState(entry.value, depth - 1)) return true;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        if (_containsPaidState(item, depth - 1)) return true;
+      }
+    } else if (_isPaidStatus(value)) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isPaidStatus(dynamic status) {
+    if (status == true) return true;
+    if (status is num) return status == 1;
+    final s = status?.toString().trim().toLowerCase() ?? '';
+    if (s.isEmpty) return false;
+    if (s.contains('cancel') ||
+        s.contains('refund') ||
+        s.contains('failed') ||
+        s.contains('void') ||
+        s.contains('unpaid') ||
+        s.contains('pending')) {
+      return false;
+    }
+    return s.contains('paid') ||
+        s.contains('completed') ||
+        s.contains('success') ||
+        s.contains('successful') ||
+        s.contains('captured') ||
+        s.contains('authorized');
+  }
+
+  void _showGlobalScanSnack(
+    String message, {
+    required Color background,
+    Duration duration = const Duration(seconds: 1),
+  }) {
+    final messenger = rootScaffoldMessengerKey.currentState;
+    if (messenger == null) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: background,
+        duration: duration,
+      ),
+    );
   }
 
   @override

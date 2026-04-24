@@ -1,12 +1,10 @@
 import 'dart:async';
 
 import 'package:api_selfxo_project/background_image/background_image.dart';
-import 'package:api_selfxo_project/printer/printer_s.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class PickupQrScreen extends StatefulWidget {
   final List<Map<String, dynamic>> cart;
@@ -29,7 +27,6 @@ class PickupQrScreen extends StatefulWidget {
 class _PickupQrScreenState extends State<PickupQrScreen> {
   static const Duration _screenTimeout = Duration(minutes: 2);
 
-  final PrinterService _printerService = PrinterService();
   final FocusNode _keyboardFocusNode =
       FocusNode(debugLabel: 'pickup-qr-keyboard');
   final FocusNode _scanInputFocusNode =
@@ -229,24 +226,11 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
     });
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final resolvedRestaurantName =
-          (widget.restaurantName?.trim().isNotEmpty ?? false)
-              ? widget.restaurantName!.trim()
-              : (prefs.getString("restaurant_name")?.trim().isNotEmpty ?? false)
-                  ? prefs.getString("restaurant_name")!.trim()
-                  : "OUR KITCHEN";
-      final taxId = prefs.getString("gst_number") ?? prefs.getString("tax_id");
-
-      await _printerService.printOrder(
-        orderId: widget.orderId,
-        cartItems: widget.cart,
-        restaurantName: resolvedRestaurantName,
-        taxId: taxId,
-        paymentMode: "PAID",
+      await PaymentSuccessDialog.printReceiptUsingTabletFlow(
+        cart: widget.cart,
+        orderNumber: widget.orderId,
+        restaurantName: widget.restaurantName,
         orderType: widget.orderType,
-        forceLocal: true,
-        removeTaxLines: true,
       );
 
       if (!mounted) return;

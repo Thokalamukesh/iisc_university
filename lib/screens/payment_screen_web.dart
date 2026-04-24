@@ -2494,10 +2494,6 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
       await KioskApi().printReceipt(widget.orderNumber);
     }, 'backend-printReceipt');
 
-    await tryPrint(() async {
-      html.window.print();
-    }, 'window.print');
-
     if (!mounted) return;
     if (printed) {
       _autoReturnTimer?.cancel();

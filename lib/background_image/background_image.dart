@@ -331,6 +331,13 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     final normalized = _normalizeScanInput(value).toLowerCase();
     if (normalized.isEmpty) return null;
 
+    final pickupTagged = RegExp(r'print[_\-:]?order[_\-:]?(\d{1,12})')
+        .firstMatch(normalized);
+    if (pickupTagged != null) {
+      final parsed = int.tryParse(pickupTagged.group(1) ?? "");
+      if (parsed != null && parsed > 0) return parsed;
+    }
+
     final direct = int.tryParse(normalized);
     if (direct != null && direct > 0) return direct;
 
@@ -549,17 +556,60 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     }
 
     if (hasError) {
-      return const Scaffold(
+      return Scaffold(
         backgroundColor: Colors.black,
         body: Center(
-          child: CircularProgressIndicator(color: Colors.white),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.cloud_off_rounded, color: Colors.white, size: 44),
+                const SizedBox(height: 12),
+                const Text(
+                  "Unable to load kiosk screen",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                if (_errorDetails != null && _errorDetails!.trim().isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _errorDetails!,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: _loadRestaurant,
+                  child: const Text("Retry"),
+                ),
+              ],
+            ),
+          ),
         ),
       );
     }
     if (isLoading) {
       return const Scaffold(
         backgroundColor: Colors.black,
-        body: Center(child: CircularProgressIndicator(color: Colors.white)),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(color: Colors.white),
+              SizedBox(height: 12),
+              Text(
+                "Loading kiosk data...",
+                style: TextStyle(color: Colors.white70),
+              ),
+            ],
+          ),
+        ),
       );
     }
 

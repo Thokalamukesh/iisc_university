@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/core/order_utils.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:api_selfxo_project/printer/epson_usb_printer_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
+import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -23,9 +25,13 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   final EpsonUSBPrinterService _usbService = EpsonUSBPrinterService();
   final TextEditingController _kioskNameCtrl = TextEditingController();
   final TextEditingController _scannerCtrl = TextEditingController();
+  final FocusNode _kioskNameFocusNode = FocusNode(
+    debugLabel: "setup-kiosk-name",
+  );
   final FocusNode _scannerFocusNode = FocusNode(
     debugLabel: "setup-scanner-test",
   );
+  final StringBuffer _globalScanBuffer = StringBuffer();
 
   bool isLoading = true;
   bool _savingKioskName = false;
@@ -33,13 +39,14 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   bool _active = true;
   bool _scannerWorking = false;
   bool _scannerPrintRunning = false;
-  bool _scanPrintDialogOpen = false;
   int _queuedScannerPrintJobs = 0;
 
   Timer? _scannerIdleTimer;
   Timer? _scannerRefocusTimer;
+  Timer? _globalScanIdleTimer;
   String _scannerStatus = "Scan any barcode/QR to test scanner.";
   String? _lastScannerValue;
+  late final KeyEventCallback _globalKeyHandler;
 
   static const Set<String> _dummyPrintScanTokens = {
     "DUMMYPRINT",
@@ -56,6 +63,19 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   @override
   void initState() {
     super.initState();
+    _globalKeyHandler = (event) {
+      if (!mounted || !_active || event is! KeyDownEvent) {
+        return false;
+      }
+      if (_scannerPrintRunning) {
+        return false;
+      }
+      if (_kioskNameFocusNode.hasFocus || _scannerFocusNode.hasFocus) {
+        return false;
+      }
+      return _captureGlobalScanKey(event);
+    };
+    HardwareKeyboard.instance.addHandler(_globalKeyHandler);
     _loadSettings();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusScannerField();
@@ -64,7 +84,6 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       _,
     ) {
       if (!_active || !mounted) return;
-      if (_scanPrintDialogOpen) return;
       _focusScannerField();
     });
   }
@@ -74,7 +93,10 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     _active = false;
     _scannerIdleTimer?.cancel();
     _scannerRefocusTimer?.cancel();
+    _globalScanIdleTimer?.cancel();
+    HardwareKeyboard.instance.removeHandler(_globalKeyHandler);
     _kioskNameCtrl.dispose();
+    _kioskNameFocusNode.dispose();
     _scannerCtrl.dispose();
     _scannerFocusNode.dispose();
     super.dispose();
@@ -394,41 +416,158 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     return false;
   }
 
-  Future<void> _showScanPrintConfirmDialog(String scannedValue) async {
-    if (!mounted || _scanPrintDialogOpen) return;
-    _scannerFocusNode.unfocus();
-    _scanPrintDialogOpen = true;
-    final shouldPrint = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text("Scanner Confirmation"),
-          content: Text(
-            'Scanned value:\n"$scannedValue"\n\nRun test print now?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text("Cancel"),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text("Print Test"),
-            ),
-          ],
-        );
-      },
+  int? _extractOrderIdFromPaymentQr(String value) {
+    final normalized = _normalizeScannerInput(value).toUpperCase();
+    final match = RegExp(r'PRINT[_\-:]?ORDER[_\-:]?(\d{1,12})').firstMatch(
+      normalized,
     );
-    _scanPrintDialogOpen = false;
-    if (shouldPrint == true) {
-      await _runScannerTriggeredTestPrint(scannedValue);
-    } else if (mounted) {
-      setState(() {
-        _scannerStatus = 'Scan confirmed. Print skipped.';
-      });
+    final parsed = int.tryParse(match?.group(1) ?? "");
+    if (parsed == null || parsed <= 0) return null;
+    return parsed;
+  }
+
+  bool _isPaidStatus(dynamic status) {
+    if (status == true) return true;
+    if (status is num) return status == 1;
+    final s = status?.toString().trim().toLowerCase() ?? "";
+    if (s.isEmpty) return false;
+    if (s.contains("cancel") ||
+        s.contains("refund") ||
+        s.contains("failed") ||
+        s.contains("void") ||
+        s.contains("unpaid") ||
+        s.contains("pending")) {
+      return false;
     }
-    _focusScannerField();
+    return s.contains("paid") ||
+        s.contains("completed") ||
+        s.contains("success") ||
+        s.contains("successful") ||
+        s.contains("captured") ||
+        s.contains("authorized");
+  }
+
+  bool _containsPaidState(dynamic value, int depth) {
+    if (value == null || depth <= 0) return false;
+    if (value is Map) {
+      for (final key in const [
+        "status",
+        "payment_status",
+        "paymentStatus",
+        "order_status",
+        "orderStatus",
+        "state",
+        "payment_state",
+        "paymentState",
+        "paid",
+        "is_paid",
+        "isPaid",
+        "success",
+        "is_success",
+        "isSuccess",
+        "result",
+        "message",
+      ]) {
+        if (value.containsKey(key) && _isPaidStatus(value[key])) {
+          return true;
+        }
+      }
+      for (final nestedKey in const [
+        "data",
+        "order",
+        "payment",
+        "response",
+        "result",
+        "payload",
+      ]) {
+        if (value.containsKey(nestedKey) &&
+            _containsPaidState(value[nestedKey], depth - 1)) {
+          return true;
+        }
+      }
+      for (final entry in value.entries) {
+        if (_containsPaidState(entry.value, depth - 1)) {
+          return true;
+        }
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        if (_containsPaidState(item, depth - 1)) return true;
+      }
+    } else if (_isPaidStatus(value)) {
+      return true;
+    }
+    return false;
+  }
+
+  Future<T> _withKioskTokenRecovery<T>(Future<T> Function() action) async {
+    try {
+      return await action();
+    } catch (e) {
+      final message = e.toString().toLowerCase();
+      final tokenMissing = message.contains("kiosk token missing") ||
+          message.contains("auth_token") ||
+          message.contains("unauthorized");
+      if (!tokenMissing) rethrow;
+      await DeviceBootstrap.ensureDeviceReady();
+      return action();
+    }
+  }
+
+  Future<void> _runScannerTriggeredOrderPrint({
+    required int orderId,
+    required String scannedValue,
+  }) async {
+    if (!mounted || _scannerPrintRunning) return;
+    setState(() {
+      _scannerPrintRunning = true;
+      _scannerStatus = 'Payment QR "$scannedValue" detected. Checking payment...';
+    });
+    try {
+      final paymentRes = await _withKioskTokenRecovery(
+        () => KioskApi().checkPayment(orderId),
+      );
+      final isPaid = _containsPaidState(paymentRes.data, 5);
+      if (!isPaid) {
+        if (!mounted) return;
+        setState(() {
+          _scannerStatus = "Order #$orderId is not paid yet.";
+        });
+        _showSnackBar("Order #$orderId is not paid yet.", Colors.orange.shade800);
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _scannerStatus = "Payment verified for order #$orderId. Printing...";
+      });
+
+      await _withKioskTokenRecovery(
+        () => PaymentSuccessDialog.printReceiptUsingTabletFlow(
+          cart: const [],
+          orderNumber: orderId,
+          restaurantName: restaurantName,
+        ),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _scannerStatus = "Order #$orderId printed successfully.";
+      });
+      _showSnackBar("Order #$orderId printed successfully.", Colors.green.shade700);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _scannerStatus = "Print failed for order #$orderId.";
+      });
+      _showSnackBar("Print failed for order #$orderId: $e", Colors.red.shade700);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _scannerPrintRunning = false;
+        });
+      }
+    }
   }
 
   Future<void> _runScannerTriggeredTestPrint(String scannedValue) async {
@@ -489,7 +628,17 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       unawaited(_runScannerTriggeredTestPrint(value));
       return;
     }
-    unawaited(_showScanPrintConfirmDialog(value));
+    final orderId = _extractOrderIdFromPaymentQr(value);
+    if (orderId != null) {
+      unawaited(
+        _runScannerTriggeredOrderPrint(orderId: orderId, scannedValue: value),
+      );
+      return;
+    }
+    setState(() {
+      _scannerStatus =
+          'Unsupported scan "$value". Use SELFX_TEST_PRINT or payment QR PRINT_ORDER_<id>.';
+    });
   }
 
   void _handleScannerChanged(String value) {
@@ -513,7 +662,57 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     ).showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
   }
 
+  bool _isControlCharacter(String value) {
+    final code = value.codeUnitAt(0);
+    return code < 32 || code == 127;
+  }
+
+  bool _captureGlobalScanKey(KeyDownEvent event) {
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter ||
+        event.logicalKey == LogicalKeyboardKey.tab) {
+      final captured = _globalScanBuffer.toString();
+      _globalScanBuffer.clear();
+      if (captured.trim().isEmpty) return false;
+      _consumeScannerInput(captured);
+      return true;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.backspace) {
+      if (_globalScanBuffer.isNotEmpty) {
+        final current = _globalScanBuffer.toString();
+        _globalScanBuffer
+          ..clear()
+          ..write(current.substring(0, current.length - 1));
+      }
+      _scheduleGlobalScanIdleFlush();
+      return _globalScanBuffer.isNotEmpty;
+    }
+
+    final character = event.character;
+    if (character != null &&
+        character.isNotEmpty &&
+        !_isControlCharacter(character)) {
+      _globalScanBuffer.write(character);
+      _scheduleGlobalScanIdleFlush();
+      return true;
+    }
+
+    return false;
+  }
+
+  void _scheduleGlobalScanIdleFlush() {
+    _globalScanIdleTimer?.cancel();
+    _globalScanIdleTimer = Timer(const Duration(milliseconds: 450), () {
+      final captured = _globalScanBuffer.toString();
+      _globalScanBuffer.clear();
+      if (captured.trim().isEmpty) return;
+      _consumeScannerInput(captured);
+    });
+  }
+
   void _focusScannerField() {
+    if (_kioskNameFocusNode.hasFocus) return;
     if (!_scannerFocusNode.canRequestFocus) return;
     if (_scannerFocusNode.hasFocus) return;
     _scannerFocusNode.requestFocus();
@@ -550,10 +749,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
-          : GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTap: _focusScannerField,
-              child: ListView(
+          : ListView(
               padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
               children: [
                 _sectionTitle("Restaurant Info"),
@@ -598,6 +794,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                       const SizedBox(height: 10),
                       TextField(
                         controller: _kioskNameCtrl,
+                        focusNode: _kioskNameFocusNode,
                         textAlign: TextAlign.center,
                         style: const TextStyle(
                           fontSize: 22,
@@ -659,7 +856,6 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                       const SizedBox(height: 6),
                       Text(
                         "Tap the field below and scan a barcode/QR. If value appears, scanner is connected.\n"
-                        "Any scan will ask confirmation for dummy test print.\n"
                         "For direct auto-print queue, scan dummy code: SELFX_TEST_PRINT\n"
                         "Each dummy scan = one print.",
                         style: TextStyle(color: Colors.grey.shade600),
@@ -805,7 +1001,6 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                   ),
                 ),
               ],
-            ),
             ),
     );
   }
