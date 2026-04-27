@@ -205,6 +205,8 @@ class PrinterService {
   Future<void> printOrder({
     required int orderId,
     required List<Map<String, dynamic>> cartItems,
+    int? displayOrderNumber,
+    num? totalAmountOverride,
     String? restaurantName,
     String? address,
     String? taxId,
@@ -283,6 +285,8 @@ class PrinterService {
 
       final receiptData = await compute(_buildReceiptIsolate, {
         "orderId": orderId,
+        "displayOrderNumber": displayOrderNumber,
+        "totalAmountOverride": totalAmountOverride,
         "cartItems": cartItems,
         "restaurantName": restaurantName ?? "SELFX",
         "address": address,
@@ -296,6 +300,7 @@ class PrinterService {
         "orderType": orderType,
         "receiptMode": receiptMode,
         "removeTaxLines": removeTaxLines,
+        "parcelTotalOverride": parcelTotalOverride,
       });
 
       await _printWithSunmi(receiptData);
@@ -369,6 +374,8 @@ class PrinterService {
         "address": address,
         "taxId": taxId,
         "orderId": orderId,
+        "displayOrderNumber": displayOrderNumber,
+        "totalAmountOverride": totalAmountOverride,
         "orderDate": orderDate?.millisecondsSinceEpoch,
         "transactionId": transactionId,
         "paymentMode": paymentMode ?? "PAID",
@@ -379,6 +386,7 @@ class PrinterService {
         "orderType": orderType,
         "receiptMode": receiptMode,
         "removeTaxLines": removeTaxLines,
+        "parcelTotalOverride": parcelTotalOverride,
       });
 
       await _usbService.printData(printer: printer, printObject: fallbackData);
@@ -1862,12 +1870,22 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
         t.padLeft(6);
   }
 
+  void addRestaurantHeader(String title) {
+    final normalized = title.trim().isEmpty ? "SELFX" : title.trim();
+    final wrapped = _wrapIsolate(normalized, width - 2);
+    for (final line in wrapped) {
+      add(center(line), align: 1, bold: true, size: 'md');
+    }
+  }
+
   final String restaurantName = (args["restaurantName"] ?? "SELFX").toString();
   final String? address = args["address"]?.toString();
   final String? taxId = args["taxId"]?.toString();
   final String paymentMode = (args["paymentMode"] ?? "PAID").toString();
   final String? transactionId = args["transactionId"]?.toString();
   final int orderId = (args["orderId"] as num?)?.toInt() ?? 0;
+  final int displayOrderNumber =
+      (args["displayOrderNumber"] as num?)?.toInt() ?? orderId;
   final List cartItems = args["cartItems"] as List? ?? const [];
   final num tax = (args["taxAmount"] as num?) ?? 0;
   final num discount = (args["discountAmount"] as num?) ?? 0;
@@ -1876,6 +1894,12 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
   final String? orderTypeRaw = args["orderType"]?.toString();
   final String? receiptModeRaw = args["receiptMode"]?.toString();
   final bool removeTaxLines = args["removeTaxLines"] == true;
+  final num? totalAmountOverride = args["totalAmountOverride"] is num
+      ? args["totalAmountOverride"] as num
+      : num.tryParse("${args["totalAmountOverride"] ?? ""}");
+  final num? parcelTotalOverride = args["parcelTotalOverride"] is num
+      ? args["parcelTotalOverride"] as num
+      : num.tryParse("${args["parcelTotalOverride"] ?? ""}");
 
   bool isTakeAway() {
     final v = orderTypeRaw?.toLowerCase() ?? "";
@@ -1917,7 +1941,7 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
       add(center("COUNTER COPY"), align: 1, bold: true);
     }
 
-    add(center(restaurantName), align: 1, bold: true, size: 'lg');
+    addRestaurantHeader(restaurantName);
 
     if (address?.isNotEmpty == true) {
       for (final l in _wrapIsolate(address!, width)) {
@@ -1929,10 +1953,10 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
       add(center("GST: $taxId"), align: 1);
     }
 
-    add(center("SELFX ORDER #$orderId"), align: 1, bold: true);
+    add(center("SELFX ORDER #$displayOrderNumber"), align: 1, bold: true);
     add(divider());
 
-    add(lr("Order No", orderId.toString()));
+    add(lr("Order No", displayOrderNumber.toString()));
     add(lr("Date", dateTime));
     final orderLabel = orderTypeLabel();
     if (orderLabel != null && orderLabel.trim().isNotEmpty) {
@@ -1960,22 +1984,36 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
     String? currentCategory;
     num categoryTotal = 0;
     num grandTotal = 0;
-    num parcelTotal = 0;
+    num parcelTotal = (parcelTotalOverride != null && parcelTotalOverride > 0)
+        ? parcelTotalOverride
+        : 0;
 
     for (final item in cartItems) {
       if (item is! Map) continue;
       final category = item['category']?.toString();
-      final qty = (item['qty'] as num?)?.toInt() ?? 0;
+      final rawQty = item['qty'] ?? item['quantity'] ?? item['count'];
+      final qty =
+          (rawQty is num ? rawQty.toInt() : int.tryParse("$rawQty")) ?? 0;
+      final safeQty = qty <= 0 ? 1 : qty;
       num price = item['price'] is num
           ? item['price'] as num
           : num.tryParse("${item['price']}") ?? 0;
+      final num lineAmount = item['amount'] is num
+          ? item['amount'] as num
+          : num.tryParse(
+                  "${item['amount'] ?? item['total'] ?? item['value'] ?? item['line_total'] ?? item['total_amount']}") ??
+              0;
+      if (price <= 0 && lineAmount > 0) {
+        price = lineAmount / safeQty;
+      }
       final num parcelCharge = item['take_away_charge'] is num
           ? item['take_away_charge'] as num
           : num.tryParse(
                   "${item['take_away_charge'] ?? item['parcel_charge'] ?? item['parcelCharge'] ?? item['takeaway_charge']}") ??
               0;
-      if (parcelCharge > 0) {
-        parcelTotal += parcelCharge * qty;
+      if ((parcelTotalOverride == null || parcelTotalOverride <= 0) &&
+          parcelCharge > 0) {
+        parcelTotal += parcelCharge * safeQty;
       }
       String name = (item['name'] ?? item['item_name'] ?? '').toString().trim();
       if (name.isEmpty || name.toLowerCase() == "null") {
@@ -1992,7 +2030,7 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
           }
         }
       }
-      final num total = qty * price;
+      final num total = lineAmount > 0 ? lineAmount : safeQty * price;
 
       if (category != null && category != currentCategory) {
         if (currentCategory != null) {
@@ -2012,7 +2050,7 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
       add(
         itemRow(
           name,
-          qty.toString(),
+          safeQty.toString(),
           price.toStringAsFixed(2),
           total.toStringAsFixed(2),
         ),
@@ -2026,7 +2064,10 @@ List<Map<String, dynamic>> _buildReceiptIsolate(
     }
 
     // ================= TOTALS =================
-    final payable = grandTotal + parcelTotal + tax - discount;
+    final computedPayable = grandTotal + parcelTotal + tax - discount;
+    final payable = (totalAmountOverride != null && totalAmountOverride >= 0)
+        ? totalAmountOverride
+        : computedPayable;
 
     if (!parcelCopy) {
       if (!removeTaxLines && tax > 0) add(lr("Tax", money(tax)));
@@ -2657,10 +2698,20 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
         total.padLeft(6);
   }
 
+  void addRestaurantHeader(String title) {
+    final normalized = title.trim().isEmpty ? "SELFX" : title.trim();
+    final wrapped = _wrapIsolate(normalized, width - 2);
+    for (final line in wrapped) {
+      text(center(line), align: 1, bold: true, large: false);
+    }
+  }
+
   final String restaurantName = (args["restaurantName"] ?? "SELFX").toString();
   final String? address = args["address"]?.toString();
   final String? taxId = args["taxId"]?.toString();
   final int orderId = (args["orderId"] as num?)?.toInt() ?? 0;
+  final int displayOrderNumber =
+      (args["displayOrderNumber"] as num?)?.toInt() ?? orderId;
   final String paymentMode = (args["paymentMode"] ?? "PAID").toString();
   final String? transactionId = args["transactionId"]?.toString();
   final List cartItems = args["cartItems"] as List? ?? const [];
@@ -2671,6 +2722,12 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
   final String? orderTypeRaw = args["orderType"]?.toString();
   final String? receiptModeRaw = args["receiptMode"]?.toString();
   final bool removeTaxLines = args["removeTaxLines"] == true;
+  final num? totalAmountOverride = args["totalAmountOverride"] is num
+      ? args["totalAmountOverride"] as num
+      : num.tryParse("${args["totalAmountOverride"] ?? ""}");
+  final num? parcelTotalOverride = args["parcelTotalOverride"] is num
+      ? args["parcelTotalOverride"] as num
+      : num.tryParse("${args["parcelTotalOverride"] ?? ""}");
 
   bool isTakeAway() {
     final v = orderTypeRaw?.toLowerCase() ?? "";
@@ -2711,7 +2768,7 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
       text(center("COUNTER COPY"), align: 1, bold: true);
     }
 
-    text(center(restaurantName), align: 1, bold: true, large: true);
+    addRestaurantHeader(restaurantName);
 
     if (address?.isNotEmpty == true) {
       for (final l in _wrapIsolate(address!, width)) {
@@ -2723,10 +2780,10 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
       text(center("GST: $taxId"), align: 1);
     }
 
-    text(center("SELFX ORDER #$orderId"), align: 1, bold: true);
+    text(center("SELFX ORDER #$displayOrderNumber"), align: 1, bold: true);
     dotted();
 
-    text(lr("Order #", orderId.toString()));
+    text(lr("Order #", displayOrderNumber.toString()));
     text(lr("DATE", dateTime));
     final orderLabel = orderTypeLabel();
     if (orderLabel != null && orderLabel.trim().isNotEmpty) {
@@ -2754,22 +2811,36 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
     String? currentCategory;
     num categoryTotal = 0;
     num grandTotal = 0;
-    num parcelTotal = 0;
+    num parcelTotal = (parcelTotalOverride != null && parcelTotalOverride > 0)
+        ? parcelTotalOverride
+        : 0;
 
     for (final item in cartItems) {
       if (item is! Map) continue;
-      final qty = (item['qty'] as num?)?.toInt() ?? 0;
+      final rawQty = item['qty'] ?? item['quantity'] ?? item['count'];
+      final qty =
+          (rawQty is num ? rawQty.toInt() : int.tryParse("$rawQty")) ?? 0;
+      final safeQty = qty <= 0 ? 1 : qty;
       num price = item['price'] is num
           ? item['price'] as num
           : num.tryParse("${item['price']}") ?? 0;
+      final num lineAmount = item['amount'] is num
+          ? item['amount'] as num
+          : num.tryParse(
+                  "${item['amount'] ?? item['total'] ?? item['value'] ?? item['line_total'] ?? item['total_amount']}") ??
+              0;
+      if (price <= 0 && lineAmount > 0) {
+        price = lineAmount / safeQty;
+      }
       final category = item['category']?.toString();
       final num parcelCharge = item['take_away_charge'] is num
           ? item['take_away_charge'] as num
           : num.tryParse(
                   "${item['take_away_charge'] ?? item['parcel_charge'] ?? item['parcelCharge'] ?? item['takeaway_charge']}") ??
               0;
-      if (parcelCharge > 0) {
-        parcelTotal += parcelCharge * qty;
+      if ((parcelTotalOverride == null || parcelTotalOverride <= 0) &&
+          parcelCharge > 0) {
+        parcelTotal += parcelCharge * safeQty;
       }
       String name = (item['name'] ?? item['item_name'] ?? '').toString().trim();
       if (name.isEmpty || name.toLowerCase() == "null") {
@@ -2786,7 +2857,7 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
           }
         }
       }
-      final num total = qty * price;
+      final num total = lineAmount > 0 ? lineAmount : safeQty * price;
 
       if (category != null && category != currentCategory) {
         if (currentCategory != null) {
@@ -2801,7 +2872,7 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
       }
 
       categoryTotal += total;
-      text(itemRow(name, qty.toString(), money(price), money(total)));
+      text(itemRow(name, safeQty.toString(), money(price), money(total)));
     }
 
     if (currentCategory != null) {
@@ -2810,7 +2881,10 @@ List<Map<String, dynamic>> _buildUsbReceiptIsolate(
       grandTotal += categoryTotal;
     }
 
-    final payable = grandTotal + parcelTotal + tax - discount;
+    final computedPayable = grandTotal + parcelTotal + tax - discount;
+    final payable = (totalAmountOverride != null && totalAmountOverride >= 0)
+        ? totalAmountOverride
+        : computedPayable;
 
     if (!parcelCopy) {
       if (!removeTaxLines && tax > 0) text(lr("Tax", "Rs ${money(tax)}"));

@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:api_selfxo_project/background_image/background_image.dart';
-import 'package:api_selfxo_project/screens/pickup_qr_screen.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
+import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -186,9 +186,7 @@ class _PaymentScreenState extends State<PaymentScreen>
                           Navigator.pop(dialogContext);
                           Navigator.pushAndRemoveUntil(
                             context,
-                            MaterialPageRoute(
-                              builder: (_) => const WelcomeScreen(),
-                            ),
+                            MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
                             (route) => false,
                           );
                         },
@@ -281,11 +279,6 @@ class _PaymentScreenState extends State<PaymentScreen>
       final qrRes = await KioskApi().generateQr(orderId: orderId!);
 
       qrData = _extractQrString(qrRes.data);
-      if (qrData != null) {
-        final uri = Uri.tryParse(qrData!);
-        final pn = uri?.queryParameters["pn"];
-        if (pn != null && mounted) displayRestaurantName = pn.toUpperCase();
-      }
 
       final amountPaise = _extractAmountPaise(qrRes.data);
       payableAmount = amountPaise != null
@@ -474,9 +467,9 @@ class _PaymentScreenState extends State<PaymentScreen>
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => PickupQrScreen(
+        builder: (_) => PaymentSuccessDialog(
           cart: widget.cart,
-          orderId: orderId!,
+          orderNumber: orderId!,
           restaurantName: displayRestaurantName,
           orderType: widget.orderType,
         ),
@@ -498,7 +491,7 @@ class _PaymentScreenState extends State<PaymentScreen>
         timer.cancel();
         Navigator.pushAndRemoveUntil(
           context,
-          MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+          MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
           (route) => false,
         );
       } else {

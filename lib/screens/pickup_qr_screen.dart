@@ -1,7 +1,8 @@
 import 'dart:async';
 
-import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
+import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -64,7 +65,8 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
     _startAutoReturnTimers();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusScannerInput();
-      _focusKeepAliveTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
+      _focusKeepAliveTimer =
+          Timer.periodic(const Duration(milliseconds: 700), (_) {
         if (!mounted || _isPrinting) return;
         _focusScannerInput();
       });
@@ -134,7 +136,8 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
       return;
     }
 
-    final character = event.character ?? _characterFromLogicalKey(event.logicalKey);
+    final character =
+        event.character ?? _characterFromLogicalKey(event.logicalKey);
     if (character != null &&
         character.isNotEmpty &&
         !_isControlCharacter(character)) {
@@ -226,6 +229,34 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
     });
 
     try {
+      final popupItems = _popupItemsFromCart(widget.cart);
+      final popupTotal = _popupBillFromCart(widget.cart);
+      final popupAmountText = popupTotal == null
+          ? "-"
+          : (popupTotal % 1 == 0
+              ? "Rs ${popupTotal.toStringAsFixed(0)}"
+              : "Rs ${popupTotal.toStringAsFixed(2)}");
+      unawaited(
+        showPosPaymentSuccessDialog(
+          context,
+          autoClose: const Duration(milliseconds: 1100),
+          data: PosPaymentSuccessData(
+            orderId: widget.orderId.toString(),
+            amountPaid: popupAmountText,
+            amountLabel: "Bill Amount",
+            paymentMethod: "QR Scan",
+            dateTimeText: DateTime.now()
+                .toLocal()
+                .toIso8601String()
+                .replaceFirst('T', ' ')
+                .split('.')
+                .first,
+            orderedItems: popupItems,
+            title: "Scan Accepted",
+            subtitle: "Receipt Printing",
+          ),
+        ),
+      );
       await PaymentSuccessDialog.printReceiptUsingTabletFlow(
         cart: widget.cart,
         orderNumber: widget.orderId,
@@ -238,8 +269,8 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
         _isPrinting = false;
         _statusText = "Print successful. Opening success screen...";
       });
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-      _openPaymentSuccess(debugSource: 'pickup_qr $source scan=${_lastScan ?? ""}');
+      _openPaymentSuccess(
+          debugSource: 'pickup_qr $source scan=${_lastScan ?? ""}');
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -249,6 +280,60 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
       });
       _focusScannerInput();
     }
+  }
+
+  List<String> _popupItemsFromCart(List<Map<String, dynamic>> cart) {
+    final lines = <String>[];
+    for (final item in cart) {
+      final name = (item["name"] ?? item["item_name"] ?? "").toString().trim();
+      if (name.isEmpty) continue;
+      final qty =
+          _numValue(item["qty"] ?? item["quantity"] ?? item["count"]) ?? 1;
+      final price = _numValue(
+            item["amount"] ??
+                item["total"] ??
+                item["price"] ??
+                item["unit_price"] ??
+                item["rate"],
+          ) ??
+          0;
+      final qtyText = qty % 1 == 0 ? qty.toStringAsFixed(0) : qty.toString();
+      final lineTotal = qty * price;
+      final amountText = lineTotal % 1 == 0
+          ? lineTotal.toStringAsFixed(0)
+          : lineTotal.toStringAsFixed(2);
+      lines.add("$qtyText x $name (Rs $amountText)");
+      if (lines.length >= 6) break;
+    }
+    return lines;
+  }
+
+  num? _popupBillFromCart(List<Map<String, dynamic>> cart) {
+    num total = 0;
+    var hasValue = false;
+    for (final item in cart) {
+      final qty =
+          _numValue(item["qty"] ?? item["quantity"] ?? item["count"]) ?? 1;
+      final amount = _numValue(item["amount"] ?? item["total"]);
+      if (amount != null) {
+        total += amount;
+        hasValue = true;
+        continue;
+      }
+      final unit =
+          _numValue(item["price"] ?? item["unit_price"] ?? item["rate"]);
+      if (unit != null) {
+        total += unit * qty;
+        hasValue = true;
+      }
+    }
+    return hasValue ? total : null;
+  }
+
+  num? _numValue(dynamic value) {
+    if (value == null) return null;
+    if (value is num) return value;
+    return num.tryParse(value.toString());
   }
 
   void _setStatus(String text) {
@@ -284,7 +369,7 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
     _isNavigating = true;
     Navigator.pushAndRemoveUntil(
       context,
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
       (_) => false,
     );
   }
@@ -328,7 +413,11 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
                   gradient: LinearGradient(
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
-                    colors: [Color(0xFF0E1220), Color(0xFF1E2A4A), Color(0xFF25385F)],
+                    colors: [
+                      Color(0xFF0E1220),
+                      Color(0xFF1E2A4A),
+                      Color(0xFF25385F)
+                    ],
                   ),
                 ),
                 child: Center(
@@ -381,7 +470,8 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
                                 decoration: BoxDecoration(
                                   color: const Color(0xFFF8FAFC),
                                   borderRadius: BorderRadius.circular(24),
-                                  border: Border.all(color: const Color(0xFFE2E8F0)),
+                                  border: Border.all(
+                                      color: const Color(0xFFE2E8F0)),
                                 ),
                                 child: QrImageView(
                                   data: _pickupCode,
@@ -440,7 +530,8 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
                                 decoration: BoxDecoration(
                                   color: const Color(0xFFFFF1F2),
                                   borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(color: const Color(0xFFFDA4AF)),
+                                  border: Border.all(
+                                      color: const Color(0xFFFDA4AF)),
                                 ),
                                 child: Text(
                                   _errorText!,
@@ -498,16 +589,19 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
                               children: [
                                 Expanded(
                                   child: OutlinedButton(
-                                    onPressed: _isPrinting ? null : _navigateHome,
+                                    onPressed:
+                                        _isPrinting ? null : _navigateHome,
                                     child: const Text("Cancel"),
                                   ),
                                 ),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: ElevatedButton.icon(
-                                    onPressed: (_isPrinting || _errorText == null)
+                                    onPressed: (_isPrinting ||
+                                            _errorText == null)
                                         ? null
-                                        : () => _printAfterScan(source: "retry"),
+                                        : () =>
+                                            _printAfterScan(source: "retry"),
                                     icon: _isPrinting
                                         ? const SizedBox(
                                             width: 14,
@@ -519,7 +613,9 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
                                           )
                                         : const Icon(Icons.print_rounded),
                                     label: Text(
-                                      _isPrinting ? "Printing..." : "Retry Print",
+                                      _isPrinting
+                                          ? "Printing..."
+                                          : "Retry Print",
                                     ),
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: const Color(0xFF0F766E),

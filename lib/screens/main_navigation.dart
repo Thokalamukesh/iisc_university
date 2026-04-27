@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:ui';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
+import 'package:api_selfxo_project/screens/register_screen.dart';
 import 'home_page2.dart';
 import 'cart_page.dart';
 
@@ -480,6 +482,14 @@ class _MainNavigationState extends State<MainNavigation>
   }
 
   void restartHomePage() {
+    if (kIsWeb) {
+      Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const UserIdScreen()),
+        (_) => false,
+      );
+      return;
+    }
+
     setState(() {
       homeKey = UniqueKey();
       displayedItems = 0;

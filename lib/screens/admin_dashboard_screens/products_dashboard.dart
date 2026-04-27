@@ -1,11 +1,11 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:api_selfxo_project/api/dio_client.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class ProductsTab extends StatefulWidget {
   final VoidCallback onProductsUpdated;
@@ -41,7 +41,9 @@ class _ProductsTabState extends State<ProductsTab> {
 
   void _goToWelcome() {
     Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(
+        builder: (_) => const MainNavigation(orderType: "dine_in"),
+      ),
       (_) => false,
     );
   }
@@ -58,8 +60,7 @@ class _ProductsTabState extends State<ProductsTab> {
         final id = int.tryParse(key.toString());
         if (id == null) return;
         if (value is Map) {
-          _localOverrides[id] =
-              Map<String, dynamic>.from(value as Map);
+          _localOverrides[id] = Map<String, dynamic>.from(value as Map);
         }
       });
     } catch (_) {}
@@ -76,15 +77,35 @@ class _ProductsTabState extends State<ProductsTab> {
   }
 
   // ================= LOAD DATA =================
+  List _extractItems(dynamic data) {
+    if (data is List) return data;
+    if (data is Map) {
+      final directItems = data["items"];
+      if (directItems is List) return directItems;
+      final directData = data["data"];
+      if (directData is List) return directData;
+      if (directData is Map) {
+        final nestedItems = directData["items"];
+        if (nestedItems is List) return nestedItems;
+        final nestedData = directData["data"];
+        if (nestedData is List) return nestedData;
+      }
+    }
+    return const [];
+  }
+
   Future<void> _loadProducts() async {
     if (!mounted) return;
     setState(() => loading = true);
 
     try {
-      final dio = await DioClient.getAdminDio();
-      final res = await dio.get("admin/items");
+      final res = await AdminApi().getItems();
 
-      final List items = res.data["items"] ?? res.data["data"] ?? [];
+      final List items = _extractItems(res.data);
+      kioskLog(
+        'products load status=${res.statusCode} items=${items.length}',
+        tag: 'ADMIN_PRODUCTS',
+      );
       groupedProducts.clear();
 
       for (final raw in items) {
@@ -145,7 +166,14 @@ class _ProductsTabState extends State<ProductsTab> {
       }
 
       _applySearch();
-    } catch (e) {}
+    } catch (e, stackTrace) {
+      kioskLogError(
+        'products load failed: $e',
+        tag: 'ADMIN_PRODUCTS',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
 
     if (mounted) setState(() => loading = false);
   }
@@ -224,8 +252,7 @@ class _ProductsTabState extends State<ProductsTab> {
   int? _extractCreatedItemId(dynamic data) {
     if (data == null) return null;
     if (data is Map) {
-      dynamic raw =
-          data["id"] ??
+      dynamic raw = data["id"] ??
           data["item_id"] ??
           data["itemId"] ??
           (data["item"] is Map ? data["item"]["id"] : null) ??
@@ -248,8 +275,7 @@ class _ProductsTabState extends State<ProductsTab> {
   }) async {
     try {
       final res = await AdminApi().getItems();
-      final List items =
-          res.data["items"] ?? res.data["data"] ?? const [];
+      final List items = res.data["items"] ?? res.data["data"] ?? const [];
       for (final raw in items) {
         if (raw is! Map) continue;
         final item = Map<String, dynamic>.from(raw);
@@ -269,8 +295,8 @@ class _ProductsTabState extends State<ProductsTab> {
               "${item["price"] ?? item["item_price"] ?? nestedMap?["price"] ?? nestedMap?["item_price"] ?? ""}",
             ) ??
             0;
-        final itemCategoryId = _categoryId(item) ??
-            _categoryId({"id": item["item_category_id"]});
+        final itemCategoryId =
+            _categoryId(item) ?? _categoryId({"id": item["item_category_id"]});
         final itemMenuId = _menuId(item) ?? _menuId({"id": item["menu_id"]});
         if (itemName == name &&
             itemPrice == price &&
@@ -912,59 +938,61 @@ class _ProductsTabState extends State<ProductsTab> {
 
                                             await _attachBranchAndRestaurant(
                                                 body);
-                                          final res =
-                                              await AdminApi().createItem(
-                                            body,
-                                          );
-                                          int? createdId =
-                                              _extractCreatedItemId(res.data);
-                                          createdId ??= await _resolveCreatedItemId(
-                                            name: name,
-                                            price: price,
-                                            categoryId: selectedCategoryId,
-                                            menuId: selectedMenuId,
-                                          );
-                                          if (createdId != null) {
-                                            String? catName;
-                                            if (selectedCategoryId != null) {
-                                              final found = categories
-                                                  .where(
-                                                    (c) =>
-                                                        _categoryId(c) ==
-                                                        selectedCategoryId,
-                                                  )
-                                                  .toList();
-                                              if (found.isNotEmpty) {
-                                                catName = _categoryName(
-                                                  found.first,
-                                                );
+                                            final res =
+                                                await AdminApi().createItem(
+                                              body,
+                                            );
+                                            int? createdId =
+                                                _extractCreatedItemId(res.data);
+                                            createdId ??=
+                                                await _resolveCreatedItemId(
+                                              name: name,
+                                              price: price,
+                                              categoryId: selectedCategoryId,
+                                              menuId: selectedMenuId,
+                                            );
+                                            if (createdId != null) {
+                                              String? catName;
+                                              if (selectedCategoryId != null) {
+                                                final found = categories
+                                                    .where(
+                                                      (c) =>
+                                                          _categoryId(c) ==
+                                                          selectedCategoryId,
+                                                    )
+                                                    .toList();
+                                                if (found.isNotEmpty) {
+                                                  catName = _categoryName(
+                                                    found.first,
+                                                  );
+                                                }
                                               }
+                                              _localOverrides[createdId] = {
+                                                "item_name": name,
+                                                "name": name,
+                                                "price": price,
+                                                "item_price": price,
+                                                "take_away_charge": parcel ?? 0,
+                                                "type": type,
+                                                "menu_id": selectedMenuId,
+                                                "item_category_id":
+                                                    selectedCategoryId,
+                                                "category_id":
+                                                    selectedCategoryId,
+                                                "category_name":
+                                                    catName ?? "Uncategorized",
+                                                "has_variations":
+                                                    hasVariations ? 1 : 0,
+                                                "has_variation":
+                                                    hasVariations ? 1 : 0,
+                                                "variations": hasVariations
+                                                    ? variations
+                                                    : [],
+                                                "id": createdId,
+                                                "item_id": createdId,
+                                              };
+                                              await _persistOverrides();
                                             }
-                                            _localOverrides[createdId] = {
-                                              "item_name": name,
-                                              "name": name,
-                                              "price": price,
-                                              "item_price": price,
-                                              "take_away_charge": parcel ?? 0,
-                                              "type": type,
-                                              "menu_id": selectedMenuId,
-                                              "item_category_id":
-                                                  selectedCategoryId,
-                                              "category_id": selectedCategoryId,
-                                              "category_name":
-                                                  catName ?? "Uncategorized",
-                                              "has_variations":
-                                                  hasVariations ? 1 : 0,
-                                              "has_variation":
-                                                  hasVariations ? 1 : 0,
-                                              "variations": hasVariations
-                                                  ? variations
-                                                  : [],
-                                              "id": createdId,
-                                              "item_id": createdId,
-                                            };
-                                            await _persistOverrides();
-                                          }
 
                                             if (!mounted) return;
 
@@ -1697,7 +1725,7 @@ class _ProductsTabState extends State<ProductsTab> {
                                               "category_id": selectedCategoryId,
                                               "category_name":
                                                   newCategoryName ??
-                                                  product["category_name"],
+                                                      product["category_name"],
                                               "has_variations":
                                                   hasVariations ? 1 : 0,
                                               "has_variation":
@@ -1715,8 +1743,7 @@ class _ProductsTabState extends State<ProductsTab> {
                                                   list,
                                                 ) {
                                                   list.removeWhere(
-                                                    (p) =>
-                                                        _itemId(p) == itemId,
+                                                    (p) => _itemId(p) == itemId,
                                                   );
                                                 });
                                                 final updated =
@@ -1816,10 +1843,9 @@ class _ProductsTabState extends State<ProductsTab> {
     });
 
     try {
-      final dio = await DioClient.getAdminDio();
-      await dio.put(
-        "admin/item/update/$id",
-        data: {"is_available": available ? 1 : 0},
+      await AdminApi().updateItem(
+        id.toString(),
+        {"is_available": available ? 1 : 0},
       );
 
       ScaffoldMessenger.of(context).showSnackBar(

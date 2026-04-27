@@ -2,8 +2,8 @@ import 'dart:convert';
 
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/printer/epson_usb_printer_service.dart';
-import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -98,7 +98,7 @@ class _UserIdScreenState extends State<UserIdScreen> {
       } else {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+          MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
         );
       }
     } on DioException catch (e) {

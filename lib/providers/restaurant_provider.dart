@@ -83,7 +83,7 @@ class RestaurantProvider extends ChangeNotifier {
     _errorMessage = null;
     notifyListeners();
     try {
-      _restaurants = await _loadRestaurantsSafely();
+      _restaurants = await _loadRestaurantsSafely(forceRefresh: true);
       _fallbackRestaurantId = _resolveFallbackRestaurantId();
     } catch (e) {
       _errorMessage = e.toString().replaceFirst("Exception: ", "").trim();
@@ -95,11 +95,15 @@ class RestaurantProvider extends ChangeNotifier {
   }
 
   Future<void> setSelectedRestaurant(Map<String, dynamic> restaurant) async {
-    final restaurantId = _restaurantIdentifier(restaurant);
+    final restaurantId = restaurant["id"]?.toString().trim().isNotEmpty == true
+        ? restaurant["id"].toString().trim()
+        : _restaurantIdentifier(restaurant);
     if (restaurantId == null || restaurantId.isEmpty) return;
+    final restaurantHash = restaurant["hash"]?.toString().trim();
     final restaurantName = restaurant["name"]?.toString().trim();
     await _persistSelection(
       restaurantId: restaurantId,
+      restaurantHash: restaurantHash,
       restaurantName: restaurantName,
     );
     _savedRestaurantId = restaurantId;
@@ -109,19 +113,25 @@ class RestaurantProvider extends ChangeNotifier {
 
   Future<void> _persistSelection({
     required String restaurantId,
+    String? restaurantHash,
     String? restaurantName,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString("restaurant_id", restaurantId);
+    if (restaurantHash != null && restaurantHash.trim().isNotEmpty) {
+      await prefs.setString("restaurant_hash", restaurantHash.trim());
+    }
     if (restaurantName != null && restaurantName.trim().isNotEmpty) {
       await prefs.setString("restaurant_name", restaurantName.trim());
     }
   }
 
-  Future<List<Map<String, dynamic>>> _loadRestaurantsSafely() async {
+  Future<List<Map<String, dynamic>>> _loadRestaurantsSafely({
+    bool forceRefresh = false,
+  }) async {
     try {
       return await KioskApi()
-          .getAllRestaurantsWeb()
+          .getAllRestaurantsWeb(forceRefresh: forceRefresh)
           .timeout(const Duration(seconds: 15));
     } catch (e, stackTrace) {
       kioskLogError(
@@ -162,10 +172,10 @@ class RestaurantProvider extends ChangeNotifier {
 
   String? _restaurantIdentifier(Map<String, dynamic>? restaurant) {
     if (restaurant == null) return null;
-    final hash = restaurant["hash"]?.toString().trim();
-    if (hash != null && hash.isNotEmpty) return hash;
     final id = restaurant["id"]?.toString().trim();
     if (id != null && id.isNotEmpty) return id;
+    final hash = restaurant["hash"]?.toString().trim();
+    if (hash != null && hash.isNotEmpty) return hash;
     return null;
   }
 

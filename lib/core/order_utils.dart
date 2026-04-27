@@ -1,19 +1,33 @@
 import 'package:flutter/material.dart';
+import 'package:dio/dio.dart';
 import 'package:api_selfxo_project/api/dio_client.dart';
+import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 // Adding Sunmi Imports
 import 'package:sunmi_printer_plus/enums.dart';
 import 'package:sunmi_printer_plus/sunmi_printer_plus.dart';
 import 'package:sunmi_printer_plus/sunmi_style.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class OrderUtils {
   static final ValueNotifier<int> infoRevision = ValueNotifier<int>(0);
 
+  static Future<Dio> _getAdminOrKioskDio() async {
+    try {
+      return await DioClient.getAdminDio();
+    } catch (_) {
+      try {
+        return await DioClient.getAuthedDio();
+      } catch (_) {
+        return DioClient.getDio();
+      }
+    }
+  }
+
   static void notifyInfoUpdated() {
     infoRevision.value++;
   }
+
   // ===============================
   // 1. Internal helper to fetch raw orders
   // ===============================
@@ -23,12 +37,21 @@ class OrderUtils {
     DateTimeRange? range,
   }) async {
     try {
-      final dio = await DioClient.getAdminDio();
+      final dio = await _getAdminOrKioskDio();
 
       final body = <String, dynamic>{
         "dateRange": dateRange,
         "status": status,
       };
+      final prefs = await SharedPreferences.getInstance();
+      final restaurantId = prefs.getString("restaurant_id")?.trim() ?? "";
+      if (restaurantId.isNotEmpty) {
+        body["restaurant_id"] = restaurantId;
+      }
+      final branchId = prefs.getInt("branch_id");
+      if (branchId != null) {
+        body["branch_id"] = branchId;
+      }
       if (range != null) {
         final start = _dateOnly(range.start);
         final end = _dateOnly(range.end);
@@ -50,7 +73,7 @@ class OrderUtils {
   static Future<int> getPendingOrderCount() async {
     final orders = await _getOrders(dateRange: "today", status: "");
     return orders.where((o) {
-      final s = o["status"].toString().toLowerCase();
+      final s = _extractUnifiedStatus(o).toLowerCase();
       return s != "completed" && s != "cancelled" && s != "delivered";
     }).length;
   }
@@ -76,7 +99,7 @@ class OrderUtils {
       final localDate = _parseOrderDate(o)?.toLocal();
       if (localDate != null &&
           _checkMatch(localDate, filter, now, dateRange) &&
-          _isPaidStatus(o["status"])) {
+          _isPaidStatus(_extractUnifiedStatus(o))) {
         total += double.tryParse(o["total"].toString()) ?? 0;
         count++;
       }
@@ -95,7 +118,9 @@ class OrderUtils {
   static bool _isPaidStatus(dynamic status) {
     final s = status?.toString().toLowerCase() ?? "";
     if (s.isEmpty) return false;
-    if (s.contains("cancel") || s.contains("refund") || s.contains("failed") ||
+    if (s.contains("cancel") ||
+        s.contains("refund") ||
+        s.contains("failed") ||
         s.contains("void")) {
       return false;
     }
@@ -103,7 +128,27 @@ class OrderUtils {
         s.contains("completed") ||
         s.contains("success") ||
         s.contains("successful") ||
+        s.contains("printed") ||
+        s.contains("picked") ||
+        s.contains("fulfilled") ||
+        s.contains("served") ||
         s.contains("delivered");
+  }
+
+  static String _extractUnifiedStatus(dynamic order) {
+    if (order is! Map) return "";
+    return (order["status"] ??
+            order["order_status"] ??
+            order["payment_status"] ??
+            order["paymentStatus"] ??
+            order["pickup_status"] ??
+            order["pickupStatus"] ??
+            order["print_status"] ??
+            order["printStatus"] ??
+            order["state"] ??
+            "")
+        .toString()
+        .trim();
   }
 
   // ===============================
@@ -150,7 +195,13 @@ class OrderUtils {
         "total": (o["total"] ?? 0).toString(),
         "items_count": (o["order_items"] as List?)?.length ?? 0,
         "time": DateFormat('hh:mm a').format(localDate),
-        "status": o["status"] ?? "pending",
+        "status": _extractUnifiedStatus(o).isEmpty
+            ? "pending"
+            : _extractUnifiedStatus(o),
+        "order_status": o["order_status"],
+        "payment_status": o["payment_status"] ?? o["paymentStatus"],
+        "pickup_status": o["pickup_status"] ?? o["pickupStatus"],
+        "print_status": o["print_status"] ?? o["printStatus"],
         "image_url": _getFirstItemImage(o),
         "items_label": _getItemsLabel(o),
       });
@@ -167,19 +218,18 @@ class OrderUtils {
   // 5. Restaurant Info
   // ===============================
   static Future<Map<String, dynamic>> getRestaurantInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedKioskName = prefs.getString("kiosk_name");
     try {
-      final prefs = await SharedPreferences.getInstance();
       final dio = await DioClient.getAuthedDio();
       final res = await dio.get("kiosks/getRestaurantData");
 
       final restaurant = res.data["restaurant"];
       final kiosk = res.data["kiosk_settings"];
       final branch = res.data["branch"];
-      final savedKioskName = prefs.getString("kiosk_name");
       String? taxId;
       if (restaurant is Map) {
-        taxId =
-            restaurant["gst_number"] ??
+        taxId = restaurant["gst_number"] ??
             restaurant["gstin"] ??
             restaurant["tax_id"] ??
             restaurant["taxId"] ??
@@ -205,7 +255,56 @@ class OrderUtils {
         "branch_name": kiosk?["branch_name"] ?? branch?["name"],
       };
     } catch (e) {
-      return {};
+      final restaurantId = prefs.getString("restaurant_id")?.trim() ?? "";
+      var restaurantName = prefs.getString("restaurant_name")?.trim() ?? "";
+      if (restaurantName.isEmpty && restaurantId.isNotEmpty) {
+        try {
+          final dio = Dio(
+            BaseOptions(
+              connectTimeout: const Duration(seconds: 8),
+              receiveTimeout: const Duration(seconds: 10),
+              headers: const {"Accept": "application/json"},
+              validateStatus: (status) => status != null && status < 500,
+            ),
+          );
+          final res = await dio.get(WebApiConfig.allRestaurantsUrl);
+          final data = res.data;
+          final rawList = data is List
+              ? data
+              : (data is Map
+                  ? (data["data"] ?? data["restaurants"] ?? data["items"])
+                  : null);
+          if (rawList is List) {
+            for (final item in rawList.whereType<Map>()) {
+              if ((item["id"]?.toString().trim() ?? "") == restaurantId) {
+                restaurantName = item["name"]?.toString().trim() ?? "";
+                if (restaurantName.isNotEmpty) {
+                  await prefs.setString("restaurant_name", restaurantName);
+                }
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      return {
+        "restaurant_name":
+            restaurantName.isNotEmpty ? restaurantName : "Restaurant",
+        "address": null,
+        "tax_id": prefs.getString("gst_number"),
+        "printer_id": null,
+        "kiosk_id": null,
+        "kiosk_name":
+            (savedKioskName != null && savedKioskName.trim().isNotEmpty)
+                ? savedKioskName
+                : "SELFX Kiosk",
+        "device_id":
+            prefs.getString("device_uuid") ?? prefs.getString("device_id"),
+        "branch_id": prefs.getInt("branch_id"),
+        "branch_name": prefs.getString("branch_name"),
+        "restaurant_id": restaurantId,
+      };
     }
   }
 
@@ -217,8 +316,9 @@ class OrderUtils {
   ) async {
     final target = DateTime(date.year, date.month, date.day);
     final dateRange = _dateRangeForDate(target);
-    final DateTimeRange? range =
-        dateRange == "custom" ? DateTimeRange(start: target, end: target) : null;
+    final DateTimeRange? range = dateRange == "custom"
+        ? DateTimeRange(start: target, end: target)
+        : null;
     final orders = await getOrdersWithItems(
       dateRange: dateRange,
       status: "",
@@ -226,7 +326,6 @@ class OrderUtils {
     );
     final results = <Map<String, dynamic>>[];
     for (final o in orders) {
-      if (o is! Map) continue;
       final dt = _parseOrderDate(o)?.toLocal();
       if (dt == null) continue;
       final local = DateTime(dt.year, dt.month, dt.day);
@@ -252,13 +351,10 @@ class OrderUtils {
         status: status,
         range: range,
       );
-      if (res is List) {
-        return res
-            .whereType<Map>()
-            .map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e))
-            .toList();
-      }
-      return [];
+      return res
+          .whereType<Map>()
+          .map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e))
+          .toList();
     } catch (e) {
       return [];
     }
@@ -273,7 +369,7 @@ class OrderUtils {
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final dio = await DioClient.getAdminDio();
+      final dio = await _getAdminOrKioskDio();
 
       await dio.post(
         "admin/kioskLog/daily-report",
@@ -339,6 +435,7 @@ class OrderUtils {
       // Feed & Cut
       await SunmiPrinter.lineWrap(3);
     } catch (e) {
+      debugPrint("printLocalSummaryReport error: $e");
     }
   }
 
@@ -646,8 +743,10 @@ class OrderUtils {
           if (v.isNotEmpty) return v;
         }
       }
-      final nested =
-          value["menu_item"] ?? value["item"] ?? value["menuItem"] ?? value["product"];
+      final nested = value["menu_item"] ??
+          value["item"] ??
+          value["menuItem"] ??
+          value["product"];
       if (nested != null) {
         final nestedName = _extractItemName(nested);
         if (nestedName != null && nestedName.trim().isNotEmpty) {

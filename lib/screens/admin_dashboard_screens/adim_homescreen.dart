@@ -2,7 +2,10 @@ import 'dart:async';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/categorie_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:api_selfxo_project/core/order_utils.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/products_dashboard.dart';
+import 'package:api_selfxo_project/services/auth_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 // Import your category screen here
 // import 'package:api_selfxo_project/screens/admin_dashboard_screens/categories_dashboard.dart';
 
@@ -20,20 +23,49 @@ class AdminHomeScreen extends StatefulWidget {
 class _AdminHomeScreenState extends State<AdminHomeScreen> {
   int index = 0;
   int badgeCount = 0;
+  int _reloadSeed = 0;
 
   bool _badgeLoading = false;
-
-  late List<Widget> pages;
 
   @override
   void initState() {
     super.initState();
-    pages = [
-      const DashboardTab(),
-      const CategoriesScreen(),
-      ProductsTab(onProductsUpdated: () {}),
-      const OrdersHistoryTab(),
-      const SettingsScreen(),
+    _attemptTokenRecovery();
+  }
+
+  Future<void> _attemptTokenRecovery() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString("auth_token")?.trim() ?? "";
+      if (token.isNotEmpty) return;
+      kioskLog('auth token missing on admin home; attempting recovery',
+          tag: 'ADMIN_HOME');
+      final ok = await AuthService().initializeKiosk(force: false);
+      kioskLog('auth token recovery result=$ok', tag: 'ADMIN_HOME');
+      if (!mounted || !ok) return;
+      setState(() {
+        _reloadSeed++;
+      });
+    } catch (e, stackTrace) {
+      kioskLogError(
+        'auth token recovery failed: $e',
+        tag: 'ADMIN_HOME',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  List<Widget> _buildPages() {
+    return [
+      DashboardTab(key: ValueKey('dashboard-$_reloadSeed')),
+      CategoriesScreen(key: ValueKey('categories-$_reloadSeed')),
+      ProductsTab(
+        key: ValueKey('products-$_reloadSeed'),
+        onProductsUpdated: () {},
+      ),
+      OrdersHistoryTab(key: ValueKey('orders-$_reloadSeed')),
+      SettingsScreen(key: ValueKey('settings-$_reloadSeed')),
     ];
   }
 
@@ -57,6 +89,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final pages = _buildPages();
     return Scaffold(
       body: IndexedStack(index: index, children: pages),
       bottomNavigationBar: _buildBottomBar(),

@@ -12,6 +12,10 @@ class DeviceUtils {
     if (restaurantId == null || restaurantId.isEmpty) {
       throw Exception("RESTAURANT_NOT_CONFIGURED");
     }
+    final registrationRestaurantId =
+        (prefs.getString("restaurant_hash")?.trim().isNotEmpty ?? false)
+            ? prefs.getString("restaurant_hash")!.trim()
+            : restaurantId;
 
     // 🔥 SECOND: generate restaurant-specific deviceId
     final deviceId =
@@ -40,7 +44,7 @@ class DeviceUtils {
       data: {
         "device_id": deviceId,
         "name": "Flutter Kiosk",
-        "restaurant_id": restaurantId,
+        "restaurant_id": registrationRestaurantId,
       },
     );
 

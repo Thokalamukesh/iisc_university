@@ -6,9 +6,14 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:api_selfxo_project/core/connectivity_service.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class DioClient {
-  static const String baseUrl = "https://selfpos.sirixo.com/api/";
+  static const String _defaultBaseUrl = "https://gitam.sirixo.com/api/";
+  static const String baseUrl = String.fromEnvironment(
+    "SELFX_IO_API_BASE_URL",
+    defaultValue: _defaultBaseUrl,
+  );
   static const int _maxRetries = 3;
   static const Duration _retryBaseDelay = Duration(milliseconds: 500);
 
@@ -42,12 +47,32 @@ class DioClient {
     dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) {
+          if (kDebugMode) {
+            kioskLog(
+              '${options.method} ${options.uri}',
+              tag: 'IO_API_REQ',
+            );
+          }
           handler.next(options);
         },
         onResponse: (response, handler) {
+          if (kDebugMode) {
+            kioskLog(
+              '${response.statusCode} ${response.requestOptions.method} ${response.requestOptions.uri}',
+              tag: 'IO_API_RES',
+            );
+          }
           handler.next(response);
         },
         onError: (DioException e, handler) async {
+          if (kDebugMode) {
+            kioskLogError(
+              '${e.requestOptions.method} ${e.requestOptions.uri} -> ${e.response?.statusCode ?? 'NO_STATUS'} ${e.message ?? ''}',
+              tag: 'IO_API_ERR',
+              error: e,
+              stackTrace: e.stackTrace,
+            );
+          }
           final status = e.response?.statusCode;
           final path = e.requestOptions.path;
           final body = e.response?.data.toString() ?? "";

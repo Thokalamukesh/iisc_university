@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
@@ -17,59 +17,6 @@ import 'package:api_selfxo_project/widget/app_network_image.dart';
 import 'package:api_selfxo_project/widget/product_card.dart';
 import 'best_selling.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'register_screen.dart';
-
-class SelectionPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.fill;
-
-    final path = Path();
-    // This value controls how "deep" the curve goes into the red area
-    const double curveDepth = 25.0;
-
-    // Start at top right
-    path.moveTo(size.width, 0);
-
-    // 1. Top Outward Curve (Concave)
-    path.quadraticBezierTo(
-      size.width,
-      curveDepth,
-      size.width - curveDepth,
-      curveDepth,
-    );
-
-    // 2. Main Body with rounded inner corners
-    path.lineTo(curveDepth, curveDepth);
-    path.quadraticBezierTo(0, curveDepth, 0, curveDepth * 2);
-    path.lineTo(0, size.height - (curveDepth * 2));
-    path.quadraticBezierTo(
-      0,
-      size.height - curveDepth,
-      curveDepth,
-      size.height - curveDepth,
-    );
-    path.lineTo(size.width - curveDepth, size.height - curveDepth);
-
-    // 3. Bottom Outward Curve (Concave)
-    path.quadraticBezierTo(
-      size.width,
-      size.height - curveDepth,
-      size.width,
-      size.height,
-    );
-
-    path.lineTo(size.width, 0);
-    path.close();
-
-    canvas.drawPath(path, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
 
 class HomePage2 extends StatefulWidget {
   final Function(
@@ -145,28 +92,15 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         error.type == DioExceptionType.sendTimeout;
   }
 
-  Future<void> _goToWelcome(BuildContext context) async {
+  Future<void> _goToAdminDashboard(BuildContext context) async {
     if (kIsWeb) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove("restaurant_id");
-      await prefs.remove("restaurant_name");
-      await prefs.remove("auth_token");
-      await prefs.remove("admin_token");
-      await prefs.remove("device_uuid");
-      await prefs.remove("device_id");
-      await prefs.setBool("kiosk_setup_done", false);
-
       if (!mounted) return;
-      Navigator.of(this.context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const UserIdScreen()),
-        (route) => false,
-      );
+      widget.onRestart();
       return;
     }
-
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
       (route) => false,
     );
   }
@@ -1321,16 +1255,22 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   }
 
   Widget _buildLeftCategoryBar() {
-    // Determine device type
     final bool isTablet = MediaQuery.of(context).size.width > 600;
+    final bool isWebMobile = kIsWeb && !isTablet;
     final double dpr = MediaQuery.of(context).devicePixelRatio;
-    final double radius = isTablet ? 35 : 28;
-    final double scale = isTablet ? 1.4 : 0.8;
+    final double avatarRadius = isTablet ? 26 : (isWebMobile ? 18 : 20);
+    final double tileMinHeight = isTablet ? 94 : (isWebMobile ? 82 : 74);
+    final double leftBarWidth = isTablet ? 154 : (isWebMobile ? 90 : 80);
 
     return Container(
-      // Updated width logic: 140 for Tablet, 100 for Mobile
-      width: isTablet ? 170 : 86,
-      color: const Color.fromARGB(255, 120, 33, 27),
+      width: leftBarWidth,
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Color(0xFF7A211B), Color(0xFF5D1713)],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
       child: Stack(
         children: [
           Column(
@@ -1338,72 +1278,64 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
               SizedBox(height: isTablet ? 16 : 12),
               Padding(
                 padding: EdgeInsets.symmetric(
-                  horizontal: isTablet ? 8 : 4,
-                  vertical: isTablet ? 8 : 6,
+                  horizontal: isTablet ? 8 : 5,
+                  vertical: isTablet ? 6 : 5,
                 ),
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 220),
                   child: _loadingProducts
-                      ? Icon(
+                      ? const Icon(
                           Icons.restaurant_menu_rounded,
-                          key: const ValueKey("categories-loading"),
+                          key: ValueKey("categories-loading"),
                           color: Colors.white,
-                          size: isTablet ? 24 : 20,
+                          size: 22,
                         )
-                      : Text(
+                      : Padding(
                           key: const ValueKey("categories-title"),
-                          "Categories",
-                          textAlign: TextAlign.center,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color:
-                                kIsWeb ? const Color(0xFFFFE2C8) : Colors.white,
-                            fontWeight:
-                                kIsWeb ? FontWeight.w900 : FontWeight.w800,
-                            letterSpacing: kIsWeb ? 0.8 : 0.5,
-                            fontSize: isTablet
-                                ? (kIsWeb ? 16 : 15)
-                                : (kIsWeb ? 12.5 : 12),
-                            height: 1.1,
-                            shadows: kIsWeb
-                                ? const [
-                                    Shadow(
-                                      color: Color(0x60000000),
-                                      blurRadius: 6,
-                                      offset: Offset(0, 1),
-                                    ),
-                                  ]
-                                : null,
+                          padding: EdgeInsets.symmetric(
+                            horizontal: isTablet ? 8 : 6,
+                            vertical: isTablet ? 4 : 3,
+                          ),
+                          child: Text(
+                            isTablet ? "Categories" : "Category",
+                            textAlign: TextAlign.center,
+                            maxLines: 2,
+                            softWrap: true,
+                            overflow: TextOverflow.clip,
+                            style: TextStyle(
+                              color: const Color(0xFFFFE5CA),
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.4,
+                              fontSize: isTablet ? 14 : 10.8,
+                              height: 1.1,
+                            ),
                           ),
                         ),
                 ),
               ),
-              SizedBox(height: 10),
+              SizedBox(height: isTablet ? 10 : 6),
               Expanded(
                 child: Column(
                   children: [
-                    // ================= CATEGORY LIST =================
                     Expanded(
                       child: ListView.builder(
                         controller: _categoryScrollController,
-                        padding: EdgeInsets.only(bottom: isTablet ? 90 : 80),
+                        padding: EdgeInsets.only(bottom: isTablet ? 72 : 64),
                         itemCount: categories.length,
                         itemBuilder: (_, i) {
                           final selected = selectedIndex == 0
                               ? i == _activeCategoryIndex
                               : i == selectedIndex;
                           final catName = categories[i];
-                          final double cacheScale = scale < 1 ? 1 : scale;
                           final int imageSize =
-                              (radius * 2 * cacheScale * dpr).round();
+                              (avatarRadius * 2 * dpr).round();
                           final String categoryImageUrl = normalizeImageUrl(
                             categoryImages[catName],
                           );
                           return Builder(
                             builder: (ctx) {
                               _leftCategoryContexts[catName] = ctx;
-                              return GestureDetector(
+                              return InkWell(
                                 key: ValueKey("left-cat-$catName"),
                                 onTap: () {
                                   setState(() {
@@ -1419,171 +1351,118 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                     scrollCtrl.jumpTo(0);
                                   });
                                 },
-                                child: Stack(
-                                  clipBehavior: Clip.none,
-                                  alignment: Alignment.center,
-                                  children: [
-                                    if (selected)
-                                      Positioned(
-                                        top: -25,
-                                        bottom: -15,
-                                        left: 15,
-                                        right: 0,
-                                        child: CustomPaint(
-                                          painter: SelectionPainter(),
+                                borderRadius: BorderRadius.circular(16),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 220),
+                                  margin: EdgeInsets.symmetric(
+                                    horizontal: isTablet ? 8 : 5,
+                                    vertical: isTablet ? 4 : 3,
+                                  ),
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: isTablet ? 6 : 4,
+                                    vertical: isTablet ? 8 : 6,
+                                  ),
+                                  constraints: BoxConstraints(
+                                    minHeight: tileMinHeight,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(16),
+                                    gradient: selected
+                                        ? const LinearGradient(
+                                            colors: [
+                                              Color(0xFFFFF7EA),
+                                              Color(0xFFF4E4CC),
+                                            ],
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                          )
+                                        : null,
+                                    color: selected
+                                        ? null
+                                        : Colors.white.withOpacity(0.08),
+                                    border: Border.all(
+                                      color: selected
+                                          ? const Color(0xFFFFE5C7)
+                                          : Colors.white.withOpacity(0.16),
+                                      width: selected ? 1.4 : 1,
+                                    ),
+                                    boxShadow: selected
+                                        ? [
+                                            BoxShadow(
+                                              color: Colors.black
+                                                  .withOpacity(0.16),
+                                              blurRadius: 14,
+                                              offset: const Offset(0, 8),
+                                            ),
+                                          ]
+                                        : const [],
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      AnimatedContainer(
+                                        duration:
+                                            const Duration(milliseconds: 220),
+                                        child: ClipOval(
+                                          child: SizedBox(
+                                            width: avatarRadius * 2,
+                                            height: avatarRadius * 2,
+                                            child: catName == "All"
+                                                ? Image.asset(
+                                                    "assets/catall.jpg",
+                                                    fit: BoxFit.cover,
+                                                    filterQuality:
+                                                        FilterQuality.high,
+                                                    errorBuilder: (_, __,
+                                                            ___) =>
+                                                        _categoryFallbackIcon(
+                                                      isTablet: isTablet,
+                                                      selected: selected,
+                                                    ),
+                                                  )
+                                                : categoryImageUrl.isNotEmpty
+                                                    ? AppNetworkImage(
+                                                        url: categoryImageUrl,
+                                                        fit: BoxFit.cover,
+                                                        cacheWidth: imageSize,
+                                                        cacheHeight: imageSize,
+                                                        fallback:
+                                                            _categoryFallbackIcon(
+                                                          isTablet: isTablet,
+                                                          selected: selected,
+                                                        ),
+                                                      )
+                                                    : _categoryFallbackIcon(
+                                                        isTablet: isTablet,
+                                                        selected: selected,
+                                                      ),
+                                          ),
                                         ),
                                       ),
-                                    Container(
-                                      padding: EdgeInsets.symmetric(
-                                        vertical: isTablet ? 20 : 15,
+                                      SizedBox(height: isTablet ? 10 : 7),
+                                      AnimatedDefaultTextStyle(
+                                        duration:
+                                            const Duration(milliseconds: 220),
+                                        style: TextStyle(
+                                          color: selected
+                                              ? const Color(0xFF512018)
+                                              : const Color(0xFFFDE9D5),
+                                          fontSize: isTablet ? 13.2 : 10.6,
+                                          fontWeight: selected
+                                              ? FontWeight.w800
+                                              : FontWeight.w700,
+                                          height: 1.2,
+                                        ),
+                                        child: Text(
+                                          catName,
+                                          textAlign: TextAlign.center,
+                                          maxLines: 3,
+                                          softWrap: true,
+                                          overflow: TextOverflow.visible,
+                                        ),
                                       ),
-                                      width: double.infinity,
-                                      constraints: BoxConstraints(
-                                        minHeight: isTablet ? 120 : 90,
-                                      ),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          AnimatedScale(
-                                            scale: scale,
-                                            duration: const Duration(
-                                              milliseconds: 300,
-                                            ),
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                shape: BoxShape.circle,
-                                                border: Border.all(
-                                                  color: selected
-                                                      ? Colors.white
-                                                      : Colors.transparent,
-                                                  width: 2,
-                                                ),
-                                                boxShadow: selected
-                                                    ? [
-                                                        BoxShadow(
-                                                          color: Colors.black
-                                                              .withOpacity(0.2),
-                                                          blurRadius: 10,
-                                                          offset: const Offset(
-                                                            0,
-                                                            5,
-                                                          ),
-                                                        ),
-                                                      ]
-                                                    : [],
-                                              ),
-                                              child: ClipOval(
-                                                child: SizedBox(
-                                                  width: radius * 2,
-                                                  height: radius * 2,
-                                                  child: catName == "All"
-                                                      ? Image.asset(
-                                                          "assets/catall.jpg",
-                                                          fit: BoxFit.cover,
-                                                          filterQuality:
-                                                              FilterQuality
-                                                                  .high,
-                                                          errorBuilder:
-                                                              (_, __, ___) =>
-                                                                  Container(
-                                                            color:
-                                                                Colors.white10,
-                                                            child: Icon(
-                                                              Icons.fastfood,
-                                                              color: Colors
-                                                                  .white70,
-                                                              size:
-                                                                  radius * 0.9,
-                                                            ),
-                                                          ),
-                                                        )
-                                                      : categoryImageUrl
-                                                              .isNotEmpty
-                                                          ? AppNetworkImage(
-                                                              url:
-                                                                  categoryImageUrl,
-                                                              fit: BoxFit.cover,
-                                                              cacheWidth:
-                                                                  imageSize,
-                                                              cacheHeight:
-                                                                  imageSize,
-                                                              fallback:
-                                                                  Container(
-                                                                color: Colors
-                                                                    .white10,
-                                                                child: Icon(
-                                                                  Icons
-                                                                      .fastfood,
-                                                                  color: Colors
-                                                                      .white70,
-                                                                  size: isTablet
-                                                                      ? 32
-                                                                      : 24,
-                                                                ),
-                                                              ),
-                                                            )
-                                                          : Container(
-                                                              color: Colors
-                                                                  .white10,
-                                                              child: Icon(
-                                                                Icons.fastfood,
-                                                                color: Colors
-                                                                    .white70,
-                                                                size: isTablet
-                                                                    ? 32
-                                                                    : 24,
-                                                              ),
-                                                            ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          SizedBox(height: isTablet ? 12 : 6),
-                                          Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 4,
-                                            ),
-                                            child: Padding(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                vertical: 4,
-                                              ),
-                                              child: Padding(
-                                                padding: const EdgeInsets.all(
-                                                  8.0,
-                                                ),
-                                                child: AnimatedDefaultTextStyle(
-                                                  duration: const Duration(
-                                                    milliseconds: 250,
-                                                  ),
-                                                  textAlign: TextAlign.center,
-                                                  style: TextStyle(
-                                                    color: selected
-                                                        ? Colors.black
-                                                        : const Color.fromARGB(
-                                                            255,
-                                                            242,
-                                                            220,
-                                                            188,
-                                                          ),
-                                                    fontSize:
-                                                        isTablet ? 16 : 14,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                  child: Text(
-                                                    catName,
-                                                    maxLines: 2,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
+                                    ],
+                                  ),
                                 ),
                               );
                             },
@@ -1622,11 +1501,28 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     );
   }
 
+  Widget _categoryFallbackIcon({
+    required bool isTablet,
+    required bool selected,
+  }) {
+    return Container(
+      color: selected
+          ? const Color(0xFFF5E4CF)
+          : const Color.fromARGB(50, 255, 255, 255),
+      child: Icon(
+        Icons.fastfood_rounded,
+        color: selected ? const Color(0xFF8D2B23) : Colors.white70,
+        size: isTablet ? 28 : 22,
+      ),
+    );
+  }
+
   Widget _buildRightArea(List<ProductModel> filtered, int gridCount) {
     final double width = MediaQuery.of(context).size.width;
     final bool isTablet = width > 600;
+    final bool isWebMobile = kIsWeb && !isTablet;
     final bool sectionMode = selectedIndex == 0;
-    final double leftBarWidth = isTablet ? 170 : 86;
+    final double leftBarWidth = isTablet ? 154 : (isWebMobile ? 90 : 80);
     final double rightAreaWidth = (width - leftBarWidth).clamp(320.0, width);
     final double gridPadding = 24; // SliverPadding left + right
     final double crossAxisSpacing = isTablet ? 17 : 12;
@@ -2412,7 +2308,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                       ),
                       onPressed: () {
                         Navigator.pop(dialogContext); // Close dialog
-                        _goToWelcome(context); // Execute reset logic
+                        _goToAdminDashboard(context); // Execute reset logic
                       },
                       child: Text(
                         "YES, RESTART",

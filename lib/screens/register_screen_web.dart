@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/providers/restaurant_provider.dart';
+import 'package:api_selfxo_project/screens/main_navigation.dart';
+import 'package:api_selfxo_project/services/auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-import '../screens/web_qr_menu_entry.dart';
 import '../widget/app_network_image_web.dart';
 
 class UserIdScreen extends StatefulWidget {
@@ -120,23 +122,18 @@ class _UserIdScreenState extends State<UserIdScreen> {
     if (query.isEmpty) return _webRestaurants;
 
     return _webRestaurants.where((restaurant) {
-      final id = restaurant["id"]?.toString() ?? "";
-      final hash = restaurant["hash"]?.toString() ?? "";
       final name = restaurant["name"]?.toString() ?? "";
-      return _normalized(name).contains(query) ||
-          _normalized(hash).contains(query) ||
-          _normalized(id).contains(query);
+      return _normalized(name).contains(query);
     }).toList();
   }
 
   Future<void> _openRestaurantMenu(Map<String, dynamic> restaurant) async {
     if (loading) return;
-    final restaurantProvider = context.read<RestaurantProvider>();
-
+    final restaurantNumericId = restaurant["id"]?.toString().trim() ?? "";
+    final restaurantHash = restaurant["hash"]?.toString().trim() ?? "";
+    final restaurantName = restaurant["name"]?.toString().trim() ?? "";
     final restaurantId =
-        restaurant["hash"]?.toString().trim().isNotEmpty == true
-            ? restaurant["hash"].toString().trim()
-            : restaurant["id"]?.toString().trim() ?? "";
+        restaurantNumericId.isNotEmpty ? restaurantNumericId : restaurantHash;
     if (restaurantId.isEmpty) {
       _showError("Selected restaurant is invalid");
       return;
@@ -147,24 +144,35 @@ class _UserIdScreenState extends State<UserIdScreen> {
       _selectedRestaurant = restaurant;
     });
 
-    unawaited(
-      restaurantProvider.setSelectedRestaurant(restaurant).catchError(
-        (Object error, StackTrace stackTrace) {
-          kioskLogError(
-            'Failed to persist selected restaurant: $error',
-            tag: 'WEB_RESTAURANTS',
-            error: error,
-            stackTrace: stackTrace,
-          );
-        },
-      ),
-    );
+    final prefs = await SharedPreferences.getInstance();
+    final previousRestaurantId = prefs.getString("restaurant_id")?.trim() ?? "";
+    final previousRestaurantHash =
+        prefs.getString("restaurant_hash")?.trim() ?? "";
+    final changedRestaurant = previousRestaurantId.isNotEmpty &&
+        previousRestaurantId != restaurantId &&
+        previousRestaurantHash != restaurantHash;
+    if (changedRestaurant) {
+      await prefs.remove("auth_token");
+      await prefs.remove("admin_token");
+      await prefs.remove("branch_id");
+      await prefs.remove("home_banner_url");
+      await prefs.remove("gst_number");
+    }
+    await prefs.setString("restaurant_id", restaurantId);
+    if (restaurantHash.isNotEmpty) {
+      await prefs.setString("restaurant_hash", restaurantHash);
+    }
+    if (restaurantName.isNotEmpty) {
+      await prefs.setString("restaurant_name", restaurantName);
+    }
+    await prefs.setBool("kiosk_setup_done", true);
+    unawaited(AuthService().initializeKiosk(force: changedRestaurant));
 
     if (!mounted) return;
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => WebQrMenuEntryScreen(restaurantId: restaurantId),
+        builder: (_) => const MainNavigation(orderType: "dine_in"),
       ),
     );
   }
@@ -181,14 +189,14 @@ class _UserIdScreenState extends State<UserIdScreen> {
     final String? logoUrl = _restaurantLogoUrl(restaurant);
 
     return InkWell(
-      borderRadius: BorderRadius.circular(22),
+      borderRadius: BorderRadius.circular(20),
       onTap: () => _openRestaurantMenu(restaurant),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(22),
+          borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color:
                 isSelected ? const Color(0xFF9F342C) : const Color(0xFFE7E3DE),
@@ -197,26 +205,29 @@ class _UserIdScreenState extends State<UserIdScreen> {
           boxShadow: [
             BoxShadow(
               color: Colors.black.withOpacity(isSelected ? 0.10 : 0.05),
-              blurRadius: isSelected ? 24 : 18,
-              offset: const Offset(0, 10),
+              blurRadius: isSelected ? 20 : 14,
+              offset: const Offset(0, 8),
             ),
           ],
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Container(
-                width: double.infinity,
-                decoration: const BoxDecoration(
-                  color: Color(0xFFF5F2EE),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 90,
+                height: 90,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF5F2EE),
+                  borderRadius: BorderRadius.circular(14),
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: logoUrl == null
                     ? const Center(
                         child: Icon(
                           Icons.storefront_rounded,
-                          size: 40,
+                          size: 34,
                           color: Color(0xFF9F342C),
                         ),
                       )
@@ -226,92 +237,65 @@ class _UserIdScreenState extends State<UserIdScreen> {
                         fallback: const Center(
                           child: Icon(
                             Icons.storefront_rounded,
-                            size: 40,
+                            size: 34,
                             color: Color(0xFF9F342C),
                           ),
                         ),
                       ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    name,
-                    maxLines: 2,
-                    overflow: TextOverflow.fade,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1F1F1F),
-                      height: 1.2,
-                      letterSpacing: 0.1,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    height: 48,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: isSelected
-                            ? const [Color(0xFFB54439), Color(0xFF8E2A23)]
-                            : const [Color(0xFFF4E8DC), Color(0xFFECD9C8)],
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF1F1F1F),
+                        height: 1.15,
+                        letterSpacing: 0.1,
                       ),
-                      borderRadius: BorderRadius.circular(14),
-                      boxShadow: [
-                        BoxShadow(
-                          color: (isSelected
-                                  ? const Color(0xFF9F342C)
-                                  : const Color(0xFFC58A5A))
-                              .withOpacity(0.18),
-                          blurRadius: 16,
-                          offset: const Offset(0, 8),
-                        ),
-                      ],
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          "Order Now",
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 0.2,
-                            color: isSelected
-                                ? Colors.white
-                                : const Color(0xFF6E302A),
-                          ),
-                        ),
-                        Container(
-                          width: 28,
-                          height: 28,
-                          decoration: BoxDecoration(
-                            color: isSelected
-                                ? Colors.white.withOpacity(0.18)
-                                : Colors.white.withOpacity(0.72),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            Icons.arrow_forward_rounded,
-                            size: 17,
-                            color: isSelected
-                                ? Colors.white
-                                : const Color(0xFF6E302A),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+              const SizedBox(width: 10),
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: isSelected
+                        ? const [Color(0xFFB54439), Color(0xFF8E2A23)]
+                        : const [Color(0xFFF4E8DC), Color(0xFFECD9C8)],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: (isSelected
+                              ? const Color(0xFF9F342C)
+                              : const Color(0xFFC58A5A))
+                          .withOpacity(0.18),
+                      blurRadius: 14,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.arrow_forward_rounded,
+                  size: 21,
+                  color: isSelected ? Colors.white : const Color(0xFF6E302A),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -486,22 +470,13 @@ class _UserIdScreenState extends State<UserIdScreen> {
                                         );
                                       }
 
-                                      return GridView.builder(
+                                      return ListView.separated(
                                         shrinkWrap: true,
                                         physics:
                                             const NeverScrollableScrollPhysics(),
                                         itemCount: filteredRestaurants.length,
-                                        gridDelegate:
-                                            SliverGridDelegateWithFixedCrossAxisCount(
-                                          crossAxisCount: media.size.width > 900
-                                              ? 4
-                                              : media.size.width > 700
-                                                  ? 3
-                                                  : 2,
-                                          crossAxisSpacing: 16,
-                                          mainAxisSpacing: 16,
-                                          childAspectRatio: 0.8,
-                                        ),
+                                        separatorBuilder: (_, __) =>
+                                            const SizedBox(height: 14),
                                         itemBuilder: (context, index) =>
                                             _buildRestaurantCard(
                                           filteredRestaurants[index],

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const Duration _heartbeatCheckInterval = Duration(seconds: 15);
@@ -10,8 +11,15 @@ const Duration _openAppCooldown = Duration(seconds: 45);
 const Duration _initialBootOpenDelay = Duration(seconds: 12);
 const Duration _manualExitDefaultCooldown = Duration(minutes: 10);
 const bool _kioskAutoStartEnabled = false;
+const bool _backgroundServiceEnabled = bool.fromEnvironment(
+  "SELFX_ENABLE_BG_SERVICE",
+  defaultValue: false,
+);
 
 Future<void> initializeKioskBackgroundService() async {
+  if (!_backgroundServiceEnabled || kDebugMode) {
+    return;
+  }
   final service = FlutterBackgroundService();
   await service.configure(
     androidConfiguration: AndroidConfiguration(
@@ -31,22 +39,26 @@ Future<void> initializeKioskBackgroundService() async {
 }
 
 void stopKioskBackgroundService() {
+  if (!_backgroundServiceEnabled) return;
   FlutterBackgroundService().invoke("stopService");
 }
 
 void sendUiHeartbeat() {
+  if (!_backgroundServiceEnabled) return;
   FlutterBackgroundService().invoke("ui_heartbeat", {
     "ts": DateTime.now().millisecondsSinceEpoch,
   });
 }
 
 void sendUiReady() {
+  if (!_backgroundServiceEnabled) return;
   FlutterBackgroundService().invoke("ui_ready", {
     "ts": DateTime.now().millisecondsSinceEpoch,
   });
 }
 
 void reportUiCrash(Object error, StackTrace stack) {
+  if (!_backgroundServiceEnabled) return;
   FlutterBackgroundService().invoke("ui_crash", {
     "error": error.toString(),
     "stack": stack.toString(),
@@ -55,6 +67,7 @@ void reportUiCrash(Object error, StackTrace stack) {
 }
 
 void sendUiManualExit({Duration cooldown = _manualExitDefaultCooldown}) {
+  if (!_backgroundServiceEnabled) return;
   FlutterBackgroundService().invoke("manual_exit", {
     "ts": DateTime.now().millisecondsSinceEpoch,
     "cooldownMs": cooldown.inMilliseconds,
@@ -77,8 +90,7 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
       final prefs = await SharedPreferences.getInstance();
       final restaurantId = prefs.getString("restaurant_id");
       final autoStartOnBoot = prefs.getBool("auto_start_on_boot") ?? false;
-      allowAutoOpen =
-          _kioskAutoStartEnabled &&
+      allowAutoOpen = _kioskAutoStartEnabled &&
           autoStartOnBoot &&
           restaurantId != null &&
           restaurantId.trim().isNotEmpty;
@@ -86,6 +98,7 @@ void kioskBackgroundOnStart(ServiceInstance service) async {
       allowAutoOpen = false;
     }
   }
+
   await refreshAllowAutoOpen();
 
   final int serviceStart = DateTime.now().millisecondsSinceEpoch;

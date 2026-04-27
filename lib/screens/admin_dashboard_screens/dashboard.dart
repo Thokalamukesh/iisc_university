@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'package:api_selfxo_project/core/order_utils.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
-import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
+import 'package:api_selfxo_project/printer/register_kiosk.dart';
+import 'package:api_selfxo_project/screens/payment_success.dart';
+import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
+import 'package:api_selfxo_project/main.dart' show rootNavigatorKey;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -37,6 +40,14 @@ class _DashboardTabState extends State<DashboardTab> {
   bool _pendingInfoRefresh = false;
   final PrinterService _printerService = PrinterService();
   late final VoidCallback _infoListener;
+  final Set<String> _seenPaidOrderKeys = <String>{};
+  final List<Map<String, dynamic>> _paymentAlerts = [];
+  final Set<String> _autoPrintedAlertKeys = <String>{};
+  final List<Map<String, dynamic>> _paymentPopupQueue = [];
+  bool _liveNotificationPrimed = false;
+  bool _showPaymentAlertsPanel = false;
+  bool _autoPrintingAlerts = false;
+  bool _paymentPopupInFlight = false;
 
   int _getOrderPk(Map<String, dynamic> order) {
     final raw = order["order_pk"] ?? order["order_id"] ?? order["id"] ?? "";
@@ -44,8 +55,7 @@ class _DashboardTabState extends State<DashboardTab> {
   }
 
   String _getOrderNumber(Map<String, dynamic> order) {
-    final raw =
-        order["order_id"] ??
+    final raw = order["order_id"] ??
         order["order_number"] ??
         order["order_pk"] ??
         "N/A";
@@ -63,6 +73,11 @@ class _DashboardTabState extends State<DashboardTab> {
       _load(force: true);
     };
     OrderUtils.infoRevision.addListener(_infoListener);
+    timer = Timer.periodic(const Duration(seconds: 8), (_) {
+      if (!_loadingInFlight) {
+        _load(force: true);
+      }
+    });
     _load();
   }
 
@@ -84,17 +99,35 @@ class _DashboardTabState extends State<DashboardTab> {
         OrderUtils.getRecentOrders(filter, dateRange: customRange),
       ]);
       if (!mounted) return;
+      final all = results[2] as List<Map<String, dynamic>>;
+      final newPaymentAlerts = _collectNewPaidOrderAlerts(all);
       setState(() {
         stats = results[0] as Map<String, dynamic>;
         info = results[1] as Map<String, dynamic>;
-        final all = results[2] as List<Map<String, dynamic>>;
         _allOrders = all;
         totalOrdersCount = all.length;
         paidOrdersCount = all.where(_isPaidOrder).length;
         unpaidOrdersCount = totalOrdersCount - paidOrdersCount;
         orders = all.take(10).toList();
+        if (newPaymentAlerts.isNotEmpty) {
+          for (final alert in newPaymentAlerts) {
+            final exists = _paymentAlerts.any(
+              (item) => item["key"].toString() == alert["key"].toString(),
+            );
+            if (!exists) {
+              _paymentAlerts.insert(0, alert);
+            }
+          }
+          while (_paymentAlerts.length > 12) {
+            _paymentAlerts.removeLast();
+          }
+          _showPaymentAlertsPanel = true;
+        }
         loading = false;
       });
+      if (newPaymentAlerts.isNotEmpty) {
+        _enqueueLivePaymentPopups(newPaymentAlerts);
+      }
       _lastFilterKey = filterKey;
       _applySearchFilter();
     } catch (_) {
@@ -110,6 +143,7 @@ class _DashboardTabState extends State<DashboardTab> {
 
   @override
   void dispose() {
+    timer?.cancel();
     OrderUtils.infoRevision.removeListener(_infoListener);
     _searchController.dispose();
     super.dispose();
@@ -118,7 +152,9 @@ class _DashboardTabState extends State<DashboardTab> {
   bool _isPaidStatus(String status) {
     final s = status.toLowerCase();
     if (s.isEmpty) return false;
-    if (s.contains("cancel") || s.contains("refund") || s.contains("failed") ||
+    if (s.contains("cancel") ||
+        s.contains("refund") ||
+        s.contains("failed") ||
         s.contains("void")) {
       return false;
     }
@@ -126,6 +162,10 @@ class _DashboardTabState extends State<DashboardTab> {
         s.contains("completed") ||
         s.contains("success") ||
         s.contains("successful") ||
+        s.contains("printed") ||
+        s.contains("picked") ||
+        s.contains("fulfilled") ||
+        s.contains("served") ||
         s.contains("delivered");
   }
 
@@ -134,6 +174,11 @@ class _DashboardTabState extends State<DashboardTab> {
             order["order_status"] ??
             order["payment_status"] ??
             order["paymentStatus"] ??
+            order["pickup_status"] ??
+            order["pickupStatus"] ??
+            order["print_status"] ??
+            order["printStatus"] ??
+            order["state"] ??
             "")
         .toString();
   }
@@ -142,9 +187,300 @@ class _DashboardTabState extends State<DashboardTab> {
     return _isPaidStatus(_extractOrderStatus(order));
   }
 
+  String _extractPaymentMethod(Map<String, dynamic> order) {
+    return _firstNonEmpty([
+      order["payment_mode"],
+      order["paymentMethod"],
+      order["payment_method"],
+      order["paymentMode"],
+      order["method"],
+      order["mode"],
+      order["gateway"],
+    ], fallback: "N/A");
+  }
+
+  String _extractPaymentDateTimeText(Map<String, dynamic> order) {
+    final dt = _extractOrderDate(order);
+    if (dt != null) {
+      return DateFormat('dd MMM yyyy, hh:mm a').format(dt.toLocal());
+    }
+    final fallback = _firstNonEmpty([
+      order["time"],
+      order["created_at"],
+      order["createdAt"],
+      order["order_date"],
+      order["date"],
+    ]);
+    return fallback.isEmpty
+        ? DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now())
+        : fallback;
+  }
+
+  bool _isLiveNotificationScope() {
+    return true;
+  }
+
+  String _paymentAlertKey(Map<String, dynamic> order) {
+    final pk = _getOrderPk(order);
+    if (pk > 0) return "pk:$pk";
+    final orderNo = _getOrderNumber(order);
+    final txn = (order["transaction_id"] ?? "").toString().trim();
+    return "order:$orderNo|txn:$txn";
+  }
+
+  int _countAlertItems(List<Map<String, dynamic>> items) {
+    int count = 0;
+    for (final item in items) {
+      count += (_asNum(item["qty"]) ?? 0).toInt();
+    }
+    return count > 0 ? count : items.length;
+  }
+
+  String _buildAlertItemsPreview(
+    List<Map<String, dynamic>> items, {
+    int maxItems = 3,
+  }) {
+    final parts = <String>[];
+    for (final item in items) {
+      final name = (item["name"] ?? "").toString().trim();
+      if (name.isEmpty) continue;
+      final qty = (_asNum(item["qty"]) ?? 0).toInt();
+      parts.add(qty > 0 ? "${qty}x $name" : name);
+      if (parts.length >= maxItems) break;
+    }
+    if (parts.isEmpty) {
+      return "Items details unavailable";
+    }
+    final remaining = items.length - parts.length;
+    if (remaining > 0) {
+      return "${parts.join(", ")} +$remaining more";
+    }
+    return parts.join(", ");
+  }
+
+  List<String> _buildAlertOrderedItems(List<Map<String, dynamic>> items) {
+    final lines = <String>[];
+    for (final item in items) {
+      final name = (item["name"] ?? "").toString().trim();
+      if (name.isEmpty) continue;
+      final qty = (_asNum(item["qty"]) ?? 0).toInt();
+      final price = _asNum(item["price"]) ?? 0;
+      final amount = qty > 0 ? (price * qty) : price;
+      final amountText = amount % 1 == 0
+          ? amount.toStringAsFixed(0)
+          : amount.toStringAsFixed(2);
+      if (qty > 0) {
+        lines.add("$qty x $name (Rs $amountText)");
+      } else {
+        lines.add("$name (Rs $amountText)");
+      }
+      if (lines.length >= 6) break;
+    }
+    return lines;
+  }
+
+  String _formatAlertAmount(num value) {
+    return value % 1 == 0 ? value.toStringAsFixed(0) : value.toStringAsFixed(2);
+  }
+
+  List<Map<String, dynamic>> _collectNewPaidOrderAlerts(
+    List<Map<String, dynamic>> all,
+  ) {
+    if (!_isLiveNotificationScope()) {
+      _liveNotificationPrimed = false;
+      return const [];
+    }
+
+    final paidOrders = all.where(_isPaidOrder).toList();
+    final now = DateTime.now();
+    final currentPaidKeys = <String>{};
+    final byKey = <String, Map<String, dynamic>>{};
+
+    for (final order in paidOrders) {
+      final key = _paymentAlertKey(order);
+      if (key.isEmpty) continue;
+      currentPaidKeys.add(key);
+      byKey[key] = order;
+    }
+
+    if (!_liveNotificationPrimed) {
+      _seenPaidOrderKeys
+        ..clear()
+        ..addAll(currentPaidKeys);
+      _liveNotificationPrimed = true;
+      return const [];
+    }
+
+    final newKeys = currentPaidKeys.difference(_seenPaidOrderKeys);
+    _seenPaidOrderKeys.addAll(currentPaidKeys);
+
+    if (newKeys.isEmpty) return const [];
+
+    final alerts = <Map<String, dynamic>>[];
+    for (final key in newKeys) {
+      final order = byKey[key];
+      if (order == null) continue;
+      final parsed = _parseOrderDetails(order);
+      final amountValue = _extractOrderTotal(order);
+      var itemsCount = _countAlertItems(parsed.items);
+      final fallbackCount = _asInt(
+        order["total_items"] ??
+            order["items_count"] ??
+            order["item_count"] ??
+            order["total_qty"],
+      );
+      if (itemsCount <= 0 && fallbackCount != null && fallbackCount > 0) {
+        itemsCount = fallbackCount;
+      }
+      var itemsPreview = _buildAlertItemsPreview(parsed.items);
+      if (itemsPreview == "Items details unavailable") {
+        final fallbackItem = _firstNonEmpty([
+          order["item_name"],
+          order["product_name"],
+          order["title"],
+          order["item"],
+        ]);
+        if (fallbackItem.isNotEmpty) {
+          itemsPreview = fallbackItem;
+        }
+      }
+      final orderedItems = _buildAlertOrderedItems(parsed.items);
+      if (orderedItems.isEmpty && itemsPreview != "Items details unavailable") {
+        orderedItems.add(itemsPreview);
+      }
+      alerts.add({
+        "key": key,
+        "orderPk": _getOrderPk(order),
+        "orderNo": _getOrderNumber(order),
+        "amount": _formatAlertAmount(amountValue),
+        "amountValue": amountValue,
+        "itemsCount": itemsCount,
+        "itemsPreview": itemsPreview,
+        "orderedItems": orderedItems,
+        "paymentMethod": _extractPaymentMethod(order),
+        "dateTimeText": _extractPaymentDateTimeText(order),
+        "time": (order["time"] ?? DateFormat('hh:mm a').format(now)).toString(),
+        "createdAt": now.toIso8601String(),
+      });
+    }
+    alerts.sort((a, b) {
+      final ao = int.tryParse(a["orderNo"].toString()) ?? 0;
+      final bo = int.tryParse(b["orderNo"].toString()) ?? 0;
+      return bo.compareTo(ao);
+    });
+    return alerts;
+  }
+
+  void _togglePaymentAlertsPanel() {
+    setState(() {
+      _showPaymentAlertsPanel = !_showPaymentAlertsPanel;
+    });
+  }
+
+  void _clearPaymentAlerts() {
+    setState(() {
+      _paymentAlerts.clear();
+      _showPaymentAlertsPanel = false;
+    });
+  }
+
+  void _enqueueLivePaymentPopups(List<Map<String, dynamic>> alerts) {
+    if (alerts.isEmpty || !mounted) return;
+    _paymentPopupQueue.addAll(alerts);
+    if (_paymentPopupInFlight) return;
+    unawaited(_drainLivePaymentPopups());
+  }
+
+  Future<void> _drainLivePaymentPopups() async {
+    if (_paymentPopupInFlight) return;
+    _paymentPopupInFlight = true;
+    try {
+      while (mounted && _paymentPopupQueue.isNotEmpty) {
+        final alert = _paymentPopupQueue.removeAt(0);
+        final orderNo = alert["orderNo"]?.toString() ?? "N/A";
+        final amountText = alert["amount"]?.toString().trim() ?? "";
+        final paymentMethod =
+            alert["paymentMethod"]?.toString().trim().isNotEmpty == true
+                ? alert["paymentMethod"].toString()
+                : "N/A";
+        final dateTimeText =
+            alert["dateTimeText"]?.toString().trim().isNotEmpty == true
+                ? alert["dateTimeText"].toString()
+                : DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now());
+        final orderedItems = (alert["orderedItems"] is List)
+            ? (alert["orderedItems"] as List)
+                .map((item) => item.toString())
+                .where((item) => item.trim().isNotEmpty)
+                .toList()
+            : const <String>[];
+        final popupContext = rootNavigatorKey.currentContext;
+        if (popupContext == null) break;
+
+        await showPosPaymentSuccessDialog(
+          popupContext,
+          autoClose: const Duration(seconds: 2),
+          data: PosPaymentSuccessData(
+            orderId: orderNo,
+            amountPaid: amountText.isEmpty ? "-" : "Rs $amountText",
+            amountLabel: "Bill Amount",
+            paymentMethod: paymentMethod,
+            dateTimeText: dateTimeText,
+            orderedItems: orderedItems,
+            title: "Payment Received",
+            subtitle: "Ready To Print",
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    } finally {
+      _paymentPopupInFlight = false;
+    }
+  }
+
+  Future<void> _autoPrintFromPaymentAlerts(
+    List<Map<String, dynamic>> alerts,
+  ) async {
+    if (_autoPrintingAlerts || alerts.isEmpty) return;
+
+    final queue = alerts.where((alert) {
+      final key = alert["key"]?.toString() ?? "";
+      if (key.isEmpty || _autoPrintedAlertKeys.contains(key)) return false;
+      final orderPk = int.tryParse(alert["orderPk"]?.toString() ?? "") ?? 0;
+      return orderPk > 0;
+    }).toList();
+
+    if (queue.isEmpty) return;
+
+    _autoPrintingAlerts = true;
+    try {
+      for (final alert in queue) {
+        if (!mounted) break;
+        final key = alert["key"]?.toString() ?? "";
+        final orderPk = int.tryParse(alert["orderPk"]?.toString() ?? "") ?? 0;
+        final orderNo = alert["orderNo"]?.toString() ?? orderPk.toString();
+        if (orderPk <= 0) continue;
+
+        _autoPrintedAlertKeys.add(key);
+        try {
+          await PaymentSuccessDialog.printReceiptUsingTabletFlow(
+            cart: const [],
+            orderNumber: orderPk,
+          );
+          if (!mounted) return;
+          _showSnackBar("Auto print done for order #$orderNo", Colors.green);
+        } catch (e) {
+          if (!mounted) return;
+          _showSnackBar(
+              "Auto print failed for order #$orderNo: $e", Colors.red);
+        }
+      }
+    } finally {
+      _autoPrintingAlerts = false;
+    }
+  }
+
   num _extractOrderTotal(Map<String, dynamic> order) {
-    final direct =
-        order["total"] ??
+    final direct = order["total"] ??
         order["grand_total"] ??
         order["amount"] ??
         order["total_amount"] ??
@@ -319,8 +655,7 @@ class _DashboardTabState extends State<DashboardTab> {
   }
 
   Future<String> _resolveRestaurantName() async {
-    final direct =
-        info["restaurant_name"]?.toString().trim() ??
+    final direct = info["restaurant_name"]?.toString().trim() ??
         info["name"]?.toString().trim() ??
         "";
     if (direct.isNotEmpty) return direct;
@@ -425,8 +760,7 @@ class _DashboardTabState extends State<DashboardTab> {
         raw["title"],
         nested["name"],
       ], fallback: "Item");
-      final category =
-          categoryOverride ??
+      final category = categoryOverride ??
           _firstNonEmpty([
             raw["category"],
             raw["category_name"],
@@ -434,22 +768,19 @@ class _DashboardTabState extends State<DashboardTab> {
             nested["category"],
             nested["category_name"],
           ], fallback: "Uncategorized");
-      final qtyRaw =
-          raw["qty"] ??
+      final qtyRaw = raw["qty"] ??
           raw["quantity"] ??
           raw["pivot"]?["quantity"] ??
           raw["count"] ??
           1;
-      final priceRaw =
-          raw["price"] ??
+      final priceRaw = raw["price"] ??
           raw["unit_price"] ??
           raw["unitPrice"] ??
           raw["pivot"]?["price"] ??
           nested["price"] ??
           raw["item_price"] ??
           0;
-      final totalRaw =
-          raw["total"] ??
+      final totalRaw = raw["total"] ??
           raw["amount"] ??
           raw["total_amount"] ??
           raw["total_price"] ??
@@ -543,16 +874,14 @@ class _DashboardTabState extends State<DashboardTab> {
           entry["title"],
         ]);
         trackCategoryOrder(categoryName);
-        final qtyRaw =
-            entry["total_qty"] ??
+        final qtyRaw = entry["total_qty"] ??
             entry["total_quantity"] ??
             entry["total_items_sold"] ??
             entry["items_sold"] ??
             entry["qty"] ??
             entry["total_items"] ??
             entry["count"];
-        final totalRaw =
-            entry["total_amount"] ??
+        final totalRaw = entry["total_amount"] ??
             entry["total"] ??
             entry["amount"] ??
             entry["total_sales"];
@@ -571,8 +900,7 @@ class _DashboardTabState extends State<DashboardTab> {
         if (items is List) {
           for (final item in _normalizeItems(
             items,
-            categoryOverride:
-                categoryName.isNotEmpty ? categoryName : null,
+            categoryOverride: categoryName.isNotEmpty ? categoryName : null,
           )) {
             addItem(item);
           }
@@ -607,8 +935,8 @@ class _DashboardTabState extends State<DashboardTab> {
           for (final item in parsed.items) {
             final category =
                 (item["category"]?.toString().trim().isNotEmpty ?? false)
-                ? item["category"].toString()
-                : "Uncategorized";
+                    ? item["category"].toString()
+                    : "Uncategorized";
             final int qty = (item["qty"] as num?)?.toInt() ?? 0;
             final num price = item["price"] is num ? item["price"] as num : 0;
             final num total = price * qty;
@@ -627,22 +955,19 @@ class _DashboardTabState extends State<DashboardTab> {
     num totalAmount = 0;
 
     final summaryMap = _findMap(data, const ["summary", "overall"]);
-    final summaryOrdersRaw =
-        summaryMap?["total_orders"] ??
+    final summaryOrdersRaw = summaryMap?["total_orders"] ??
         summaryMap?["orders"] ??
         summaryMap?["totalOrders"] ??
         summaryMap?["order_count"] ??
         summaryMap?["total_order"] ??
         summaryMap?["totalOrder"];
-    final summaryItemsRaw =
-        summaryMap?["total_items_sold"] ??
+    final summaryItemsRaw = summaryMap?["total_items_sold"] ??
         summaryMap?["total_items"] ??
         summaryMap?["items_sold"] ??
         summaryMap?["total_qty"] ??
         summaryMap?["total_quantity"] ??
         summaryMap?["totalItems"];
-    final summaryAmountRaw =
-        summaryMap?["total_amount"] ??
+    final summaryAmountRaw = summaryMap?["total_amount"] ??
         summaryMap?["total"] ??
         summaryMap?["total_sales"] ??
         summaryMap?["totalRevenue"] ??
@@ -693,8 +1018,8 @@ class _DashboardTabState extends State<DashboardTab> {
       if (!hasCategoryList) {
         items.sort(
           (a, b) => (a["name"] ?? "").toString().compareTo(
-            (b["name"] ?? "").toString(),
-          ),
+                (b["name"] ?? "").toString(),
+              ),
         );
       }
       itemsByCategory[entry.key] = items;
@@ -908,9 +1233,8 @@ class _DashboardTabState extends State<DashboardTab> {
         final dateKey = _formatDateKey(picked);
         final title = DateFormat('dd MMM yyyy').format(picked);
         final restaurantName = await _resolveRestaurantName();
-        final address = info["address"] != null
-            ? info["address"].toString()
-            : null;
+        final address =
+            info["address"] != null ? info["address"].toString() : null;
         final taxId = info["tax_id"]?.toString();
 
         await _printerService.printCategoryTotalsReport(
@@ -921,9 +1245,8 @@ class _DashboardTabState extends State<DashboardTab> {
           itemsByCategory: apiSummary.itemsByCategory,
           totalItems: apiSummary.totalItems,
           totalAmount: apiSummary.totalAmount,
-          restaurantName: restaurantName.isNotEmpty
-              ? restaurantName
-              : "Restaurant",
+          restaurantName:
+              restaurantName.isNotEmpty ? restaurantName : "Restaurant",
           address: address,
           taxId: taxId,
         );
@@ -949,8 +1272,8 @@ class _DashboardTabState extends State<DashboardTab> {
         for (final item in items) {
           final String category =
               (item["category"]?.toString().trim().isNotEmpty ?? false)
-              ? item["category"].toString()
-              : "Uncategorized";
+                  ? item["category"].toString()
+                  : "Uncategorized";
           final String name = item["name"]?.toString() ?? "Item";
           final int qty = (item["qty"] as num?)?.toInt() ?? 0;
           final num price = item["price"] is num ? item["price"] as num : 0;
@@ -993,9 +1316,8 @@ class _DashboardTabState extends State<DashboardTab> {
       final dateKey = _formatDateKey(picked);
       final title = DateFormat('dd MMM yyyy').format(picked);
       final restaurantName = await _resolveRestaurantName();
-      final address = info["address"] != null
-          ? info["address"].toString()
-          : null;
+      final address =
+          info["address"] != null ? info["address"].toString() : null;
       final taxId = info["tax_id"]?.toString();
 
       await _printerService.printCategoryTotalsReport(
@@ -1006,9 +1328,8 @@ class _DashboardTabState extends State<DashboardTab> {
         itemsByCategory: itemsByCategory,
         totalItems: totalItems,
         totalAmount: totalAmount,
-        restaurantName: restaurantName.isNotEmpty
-            ? restaurantName
-            : "Restaurant",
+        restaurantName:
+            restaurantName.isNotEmpty ? restaurantName : "Restaurant",
         address: address,
         taxId: taxId,
       );
@@ -1045,9 +1366,9 @@ class _DashboardTabState extends State<DashboardTab> {
     }
   }
 
-  void _goToWelcome() {
+  void _goToSetup() {
     Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(builder: (_) => const RegisterKioskScreen()),
       (_) => false,
     );
   }
@@ -1157,9 +1478,8 @@ class _DashboardTabState extends State<DashboardTab> {
                           final orderPk = _getOrderPk(o);
                           final orderNo = _getOrderNumber(o);
                           final time = o["time"]?.toString() ?? "";
-                          final total = o["total"] != null
-                              ? o["total"].toString()
-                              : "";
+                          final total =
+                              o["total"] != null ? o["total"].toString() : "";
 
                           return ListTile(
                             leading: const Icon(Icons.receipt_long_outlined),
@@ -1316,9 +1636,8 @@ class _DashboardTabState extends State<DashboardTab> {
       }
 
       final restaurantName = await _resolveRestaurantName();
-      final address = info["address"] != null
-          ? info["address"].toString()
-          : null;
+      final address =
+          info["address"] != null ? info["address"].toString() : null;
 
       final dateLabel = DateFormat('yyyy-MM-dd').format(start);
       await _printerService.printDailySummary(
@@ -1327,9 +1646,8 @@ class _DashboardTabState extends State<DashboardTab> {
         toDate: dateLabel,
         totalOrders: totalOrders,
         totalRevenue: totalRevenue,
-        restaurantName: restaurantName.isNotEmpty
-            ? restaurantName
-            : "Restaurant",
+        restaurantName:
+            restaurantName.isNotEmpty ? restaurantName : "Restaurant",
         address: address,
       );
       _showSnackBar("Summary printed", Colors.green);
@@ -1373,9 +1691,8 @@ class _DashboardTabState extends State<DashboardTab> {
                   ClipRRect(
                     borderRadius: BorderRadius.circular(10),
                     child: LinearProgressIndicator(
-                      value: paidOrders.isEmpty
-                          ? 0
-                          : printed / paidOrders.length,
+                      value:
+                          paidOrders.isEmpty ? 0 : printed / paidOrders.length,
                       minHeight: 10,
                       backgroundColor: Colors.grey.shade200,
                       color: const Color(0xFF9F342C),
@@ -1470,13 +1787,11 @@ class _DashboardTabState extends State<DashboardTab> {
           filter,
           dateRange: customRange,
         );
-        totalOrders =
-            int.tryParse(
+        totalOrders = int.tryParse(
               (stats["total_orders"] ?? stats["orders"] ?? 0).toString(),
             ) ??
             0;
-        totalRevenue =
-            num.tryParse(
+        totalRevenue = num.tryParse(
               (stats["total_revenue"] ?? stats["revenue"] ?? 0).toString(),
             ) ??
             0;
@@ -1500,9 +1815,8 @@ class _DashboardTabState extends State<DashboardTab> {
         toDate: toLabel,
         totalOrders: totalOrders,
         totalRevenue: totalRevenue,
-        restaurantName: restaurantName.isNotEmpty
-            ? restaurantName
-            : "Restaurant",
+        restaurantName:
+            restaurantName.isNotEmpty ? restaurantName : "Restaurant",
         address: address,
       );
       _showSnackBar("Summary printed", Colors.green);
@@ -1661,9 +1975,8 @@ class _DashboardTabState extends State<DashboardTab> {
         items: lines,
         totalItems: totalItems,
         totalAmount: totalAmount,
-        restaurantName: restaurantName.isNotEmpty
-            ? restaurantName
-            : "Restaurant",
+        restaurantName:
+            restaurantName.isNotEmpty ? restaurantName : "Restaurant",
         address: address,
         taxId: taxId,
       );
@@ -1753,8 +2066,8 @@ class _DashboardTabState extends State<DashboardTab> {
           final String name = item["name"]?.toString() ?? "Item";
           final String category =
               (item["category"]?.toString().trim().isNotEmpty ?? false)
-              ? item["category"].toString()
-              : "Uncategorized";
+                  ? item["category"].toString()
+                  : "Uncategorized";
           final int qty = (item["qty"] as num?)?.toInt() ?? 0;
           final num price = item["price"] is num ? item["price"] as num : 0;
           final num total = price * qty;
@@ -1816,9 +2129,8 @@ class _DashboardTabState extends State<DashboardTab> {
         itemsByCategory: itemsByCategory,
         totalItems: ordersCount,
         totalAmount: totalAmount,
-        restaurantName: restaurantName.isNotEmpty
-            ? restaurantName
-            : "Restaurant",
+        restaurantName:
+            restaurantName.isNotEmpty ? restaurantName : "Restaurant",
         address: address,
         taxId: taxId,
       );
@@ -1907,8 +2219,8 @@ class _DashboardTabState extends State<DashboardTab> {
         for (final item in items) {
           final String category =
               (item["category"]?.toString().trim().isNotEmpty ?? false)
-              ? item["category"].toString()
-              : "Uncategorized";
+                  ? item["category"].toString()
+                  : "Uncategorized";
           final String name = item["name"]?.toString() ?? "Item";
           final int qty = (item["qty"] as num?)?.toInt() ?? 0;
           final num price = item["price"] is num ? item["price"] as num : 0;
@@ -1979,9 +2291,8 @@ class _DashboardTabState extends State<DashboardTab> {
         itemsByCategory: itemsByCategory,
         totalItems: totalItems,
         totalAmount: totalAmount,
-        restaurantName: restaurantName.isNotEmpty
-            ? restaurantName
-            : "Restaurant",
+        restaurantName:
+            restaurantName.isNotEmpty ? restaurantName : "Restaurant",
         address: address,
         taxId: taxId,
       );
@@ -2074,8 +2385,7 @@ class _DashboardTabState extends State<DashboardTab> {
     bool found = false;
     for (final item in items) {
       final qty = item["qty"] is num ? item["qty"] as num : 1;
-      final charge =
-          item["take_away_charge"] ??
+      final charge = item["take_away_charge"] ??
           item["takeaway_charge"] ??
           item["parcel_charge"] ??
           item["parcelCharge"] ??
@@ -2229,7 +2539,6 @@ class _DashboardTabState extends State<DashboardTab> {
                     const SizedBox(height: 16),
                     _buildUnifiedFilterSection(),
                     const SizedBox(height: 16),
-
                     const SizedBox(height: 20),
                     _buildSearchAndTitle(),
                   ],
@@ -2246,15 +2555,15 @@ class _DashboardTabState extends State<DashboardTab> {
 
   Widget _buildSliverAppBar() {
     final bool isTablet = MediaQuery.of(context).size.width > 600;
+    final restaurantName =
+        (info["restaurant_name"] ?? info["name"] ?? "Restaurant").toString();
 
     return SliverAppBar(
-      expandedHeight: 90,
+      expandedHeight: 126,
       pinned: true,
       elevation: 0,
       stretch: true,
       backgroundColor: const Color(0xFF9F342C),
-
-      // 👈 LEADING LOGO
       leadingWidth: isTablet ? 120 : 100,
       leading: Padding(
         padding: const EdgeInsets.only(left: 16),
@@ -2262,115 +2571,387 @@ class _DashboardTabState extends State<DashboardTab> {
           alignment: Alignment.centerLeft,
           child: Image.asset(
             "assets/self.png",
-            height: isTablet ? 46 : 36,
+            height: isTablet ? 50 : 40,
             fit: BoxFit.contain,
           ),
         ),
       ),
-
-      // 👈 TITLE + BACKGROUND DESIGN
       flexibleSpace: FlexibleSpaceBar(
-        centerTitle: false,
+        collapseMode: CollapseMode.parallax,
         titlePadding: EdgeInsets.only(
-          left: isTablet ? 140 : 120, // prevents overlap with logo
-          bottom: 16,
+          left: isTablet ? 136 : 116,
+          bottom: 14,
         ),
-
-        background: Stack(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
+            const Text(
+              "POS Dashboard",
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+              ),
+            ),
+            Text(
+              restaurantName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.9),
+                fontWeight: FontWeight.w600,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+        background: Stack(
+          fit: StackFit.expand,
+          children: [
+            const DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Color(0xFFB6463D), Color(0xFF7E261F)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
+            ),
             Positioned(
-              right: -50,
-              top: -20,
-              child: CircleAvatar(
-                radius: 100,
-                backgroundColor: Colors.white.withOpacity(0.05),
+              left: -60,
+              top: -45,
+              child: Container(
+                width: 180,
+                height: 180,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withOpacity(0.08),
+                ),
+              ),
+            ),
+            Positioned(
+              right: -40,
+              bottom: -52,
+              child: Container(
+                width: 180,
+                height: 180,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withOpacity(0.06),
+                ),
               ),
             ),
           ],
         ),
       ),
-
-      // 👉 RIGHT EXIT BUTTON
       actions: [
         IconButton(
-          onPressed: _goToWelcome,
-          icon: const Icon(Icons.logout_rounded),
+          onPressed: _goToSetup,
+          icon: const Icon(Icons.tune_rounded),
           color: Colors.white,
-          tooltip: "Exit",
+          tooltip: "Setup",
         ),
       ],
     );
   }
 
-  Widget _buildUnifiedFilterSection() {
-    const brandRed = Color(0xFF9F342C);
+  Widget _buildPaymentAlertsPanel() {
+    final visibleAlerts = _showPaymentAlertsPanel
+        ? _paymentAlerts.take(4).toList()
+        : _paymentAlerts.take(1).toList();
+    final latest = _paymentAlerts.first;
 
-    // 1. Refined Button Design with state-aware styling
-    Widget printButton = OutlinedButton.icon(
-      onPressed: _openPrintMenu,
-      icon: const Icon(Icons.print_outlined, size: 18),
-      label: const Text("Print Summary"),
-      style:
-          OutlinedButton.styleFrom(
-            foregroundColor: brandRed,
-            side: const BorderSide(color: brandRed, width: 1.2),
-            backgroundColor: brandRed.withOpacity(0.04),
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
-            elevation: 0,
-          ).copyWith(
-            // Adds a subtle fill change when the user hovers (Web/Desktop)
-            overlayColor: MaterialStateProperty.resolveWith<Color?>(
-              (states) => states.contains(MaterialState.hovered)
-                  ? brandRed.withOpacity(0.08)
-                  : null,
-            ),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1D2532), Color(0xFF2C3445)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF2C3445).withOpacity(0.30),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
           ),
-    );
-
-    // 2. Optimized Responsive Container
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final isNarrow = constraints.maxWidth < 700;
-
-        return Container(
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 4),
-          // Ensures the layout transitions smoothly between Desktop and Mobile
-          child: Flex(
-            direction: isNarrow ? Axis.vertical : Axis.horizontal,
-            crossAxisAlignment: isNarrow
-                ? CrossAxisAlignment.start
-                : CrossAxisAlignment.center,
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Order Summary",
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight:
-                          FontWeight.w900, // Heavier weight for clear hierarchy
-                      color: Color(0xFF1A1A1A),
-                      letterSpacing: -0.4,
-                    ),
-                  ),
-                  SizedBox(height: 4),
-                  Text(
-                    "View and manage order details",
-                    style: TextStyle(fontSize: 13, color: Colors.grey),
-                  ),
-                ],
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.16),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.point_of_sale_rounded,
+                  color: Colors.white,
+                  size: 18,
+                ),
               ),
-              if (isNarrow) const SizedBox(height: 20),
-              printButton,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  _showPaymentAlertsPanel
+                      ? "Live POS Payment Feed"
+                      : "Latest Payment • Order #${latest["orderNo"]}",
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+              if (_showPaymentAlertsPanel)
+                TextButton(
+                  onPressed: _clearPaymentAlerts,
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                  child: const Text(
+                    "Clear",
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
             ],
           ),
-        );
-      },
+          const SizedBox(height: 8),
+          ...visibleAlerts.map((alert) {
+            final amountValue = _asNum(alert["amountValue"]) ?? 0;
+            final amountText = _formatAlertAmount(amountValue);
+            final itemsPreview = (alert["itemsPreview"] ?? "")
+                .toString()
+                .trim()
+                .replaceAll(RegExp(r"\s+"), " ");
+            final itemsCount = _asInt(alert["itemsCount"]) ?? 0;
+            final paymentMethod = (alert["paymentMethod"] ?? "N/A")
+                .toString()
+                .trim()
+                .replaceAll("_", " ")
+                .toUpperCase();
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.14),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.24),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            "Order #${alert["orderNo"]}",
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          alert["time"].toString(),
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.9),
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFC857).withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: const Color(0xFFFFC857).withOpacity(0.55),
+                            ),
+                          ),
+                          child: Text(
+                            "Rs $amountText",
+                            style: const TextStyle(
+                              color: Color(0xFFFFF2CF),
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      itemsPreview.isEmpty
+                          ? "Items details unavailable"
+                          : itemsPreview,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.95),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.shopping_bag_outlined,
+                          size: 14,
+                          color: Colors.white.withOpacity(0.85),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          itemsCount > 0 ? "$itemsCount items" : "Items",
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.88),
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Icon(
+                          Icons.payments_outlined,
+                          size: 14,
+                          color: Colors.white.withOpacity(0.85),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            paymentMethod.isEmpty ? "N/A" : paymentMethod,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.88),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (!_showPaymentAlertsPanel &&
+                        _paymentAlerts.length > 1 &&
+                        identical(alert, visibleAlerts.last))
+                      const SizedBox(height: 6),
+                  ],
+                ),
+              ),
+            );
+          }),
+          if (!_showPaymentAlertsPanel && _paymentAlerts.length > 1)
+            TextButton(
+              onPressed: _togglePaymentAlertsPanel,
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                padding: EdgeInsets.zero,
+              ),
+              child: Text(
+                "View ${_paymentAlerts.length - 1} more",
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUnifiedFilterSection() {
+    const brandRed = Color(0xFF9F342C);
+    final selectedLabel = _filterLabel(filter);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE5E8EF)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEEF1F7),
+              borderRadius: BorderRadius.circular(30),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.calendar_month_rounded,
+                    size: 16, color: Color(0xFF5E6472)),
+                SizedBox(width: 6),
+                Text(
+                  "Date Filter",
+                  style: TextStyle(
+                    color: Color(0xFF5E6472),
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF9F342C).withOpacity(0.08),
+              borderRadius: BorderRadius.circular(30),
+            ),
+            child: Text(
+              selectedLabel,
+              style: const TextStyle(
+                color: Color(0xFF9F342C),
+                fontWeight: FontWeight.w800,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          const SizedBox(width: 2),
+          ElevatedButton.icon(
+            onPressed: _openPrintMenu,
+            icon: const Icon(Icons.print_rounded, size: 18),
+            label: const Text(
+              "Print Report",
+              style: TextStyle(fontWeight: FontWeight.w800),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: brandRed,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2379,32 +2960,38 @@ class _DashboardTabState extends State<DashboardTab> {
         (info["restaurant_name"] ?? info["name"] ?? "Restaurant").toString();
     final address = (info["address"] ?? "Address not available").toString();
     final taxId = info["tax_id"]?.toString();
-
     final kioskName = (info["kiosk_name"] ?? "Kiosk").toString().trim().isEmpty
         ? "Kiosk"
         : (info["kiosk_name"] ?? "Kiosk").toString();
     final deviceId = info["device_id"]?.toString();
     final printerId = info["printer_id"]?.toString();
-    final branchName = info["branch_name"]?.toString();
-    final branchId = info["branch_id"]?.toString();
+    final todayRevenue = (stats["today_revenue"] ??
+            stats["todayRevenue"] ??
+            stats["revenue"] ??
+            stats["total_revenue"] ??
+            0)
+        .toString();
 
-    Widget buildCard({
-      required String title,
+    Widget infoTile({
       required IconData icon,
-      required List<Widget> lines,
+      required String title,
+      required String value,
+      String? subtitle,
+      Color accent = const Color(0xFF9F342C),
       Widget? footer,
     }) {
       return Container(
-        padding: const EdgeInsets.all(14),
+        constraints: const BoxConstraints(minHeight: 154),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.grey.shade200),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: accent.withOpacity(0.14)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.03),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
+              color: accent.withOpacity(0.10),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
             ),
           ],
         ),
@@ -2414,56 +3001,47 @@ class _DashboardTabState extends State<DashboardTab> {
             Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(9),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF9F342C).withOpacity(0.08),
-                    borderRadius: BorderRadius.circular(10),
+                    color: accent.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Icon(icon, color: const Color(0xFF9F342C), size: 18),
+                  child: Icon(icon, size: 18, color: accent),
                 ),
                 const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 13,
-                      color: Color(0xFF2D3243),
-                    ),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF2B2D34),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 10),
-            ...lines,
-            if (footer != null) ...[const SizedBox(height: 10), footer],
-          ],
-        ),
-      );
-    }
-
-    Widget infoLine(String label, String value) {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 6),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 74,
-              child: Text(
-                label,
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+            const SizedBox(height: 12),
+            Text(
+              value,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF191B22),
               ),
             ),
-            Expanded(
-              child: Text(
-                value,
-                style: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
+            if (subtitle != null && subtitle.trim().isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                subtitle,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
               ),
-            ),
+            ],
+            if (footer != null) ...[
+              const SizedBox(height: 10),
+              footer,
+            ],
           ],
         ),
       );
@@ -2471,76 +3049,70 @@ class _DashboardTabState extends State<DashboardTab> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final cards = [
-          buildCard(
-            title: "Restaurant",
-            icon: Icons.restaurant,
-            lines: [
-              Text(
-                restaurantName,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                ),
+        final max = constraints.maxWidth;
+        final tileWidth = max > 960
+            ? (max - 24) / 3
+            : max > 620
+                ? (max - 12) / 2
+                : max;
+
+        return Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            SizedBox(
+              width: tileWidth,
+              child: infoTile(
+                icon: Icons.restaurant_rounded,
+                title: "Restaurant",
+                value: restaurantName,
+                subtitle: [
+                  address,
+                  if (taxId != null && taxId.trim().isNotEmpty)
+                    "GST: ${taxId.trim()}",
+                ].join("  •  "),
               ),
-              const SizedBox(height: 6),
-              Text(
-                address,
-                style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
-              ),
-              if (taxId != null && taxId.trim().isNotEmpty) ...[
-                const SizedBox(height: 8),
-                infoLine("GST", taxId.trim()),
-              ],
-            ],
-          ),
-          buildCard(
-            title: "Kiosk Details",
-            icon: Icons.devices,
-            lines: [
-              infoLine("Name", kioskName),
-              if (deviceId != null && deviceId.trim().isNotEmpty)
-                infoLine("Device", deviceId.trim()),
-              if (printerId != null && printerId.trim().isNotEmpty)
-                infoLine("Printer", printerId.trim()),
-              if (branchName != null && branchName.trim().isNotEmpty)
-                infoLine("Branch", branchName.trim()),
-              if ((branchId ?? "").trim().isNotEmpty)
-                infoLine("Branch ID", branchId!.trim()),
-            ],
-            footer: SizedBox(
-              width: double.infinity,
-              height: 32,
-              child: ElevatedButton.icon(
-                onPressed: _runTestPrint,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF9F342C),
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  visualDensity: VisualDensity.compact,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                icon: const Icon(Icons.receipt_long, size: 14),
-                label: const FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    "Test Print",
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 11),
+            ),
+            SizedBox(
+              width: tileWidth,
+              child: infoTile(
+                icon: Icons.devices_rounded,
+                title: "Kiosk",
+                value: kioskName,
+                subtitle: [
+                  if (deviceId != null && deviceId.trim().isNotEmpty)
+                    "Device: ${deviceId.trim()}",
+                  if (printerId != null && printerId.trim().isNotEmpty)
+                    "Printer: ${printerId.trim()}",
+                ].join("  •  "),
+                footer: Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    onPressed: _runTestPrint,
+                    icon: const Icon(Icons.print_rounded, size: 16),
+                    label: const Text(
+                      "Run Test Print",
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF9F342C),
+                      side: const BorderSide(color: Color(0xFF9F342C)),
+                      visualDensity: VisualDensity.compact,
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-        ];
-
-        return Row(
-          children: [
-            Expanded(child: cards[0]),
-            const SizedBox(width: 12),
-            Expanded(child: cards[1]),
+            SizedBox(
+              width: tileWidth,
+              child: infoTile(
+                icon: Icons.currency_rupee_rounded,
+                title: "Today Revenue",
+                value: "Rs $todayRevenue",
+                subtitle: "Live sales summary from current filter",
+                accent: const Color(0xFF1B8E3E),
+              ),
+            ),
           ],
         );
       },
@@ -2550,66 +3122,48 @@ class _DashboardTabState extends State<DashboardTab> {
   Widget _buildOrderSummaryCards() {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final isWide = constraints.maxWidth >= 700;
+        final max = constraints.maxWidth;
+        final boxWidth = max > 920
+            ? (max - 24) / 3
+            : max > 620
+                ? (max - 12) / 2
+                : max;
 
-        // Use a Row for larger screens and a Column for narrow layouts.
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 12),
-          child: isWide
-              ? Row(
-                  children: [
-                    Expanded(
-                      child: _summaryCardDashboard(
-                        title: "Total Orders",
-                        value: totalOrdersCount.toString(),
-                        color: const Color(0xFF9F342C),
-                        icon: Icons.receipt_long,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _summaryCardDashboard(
-                        title: "Paid",
-                        value: paidOrdersCount.toString(),
-                        color: const Color(0xFF1B8E3E),
-                        icon: Icons.check_circle,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _summaryCardDashboard(
-                        title: "Unpaid",
-                        value: unpaidOrdersCount.toString(),
-                        color: Colors.orange,
-                        icon: Icons.hourglass_top_rounded,
-                      ),
-                    ),
-                  ],
-                )
-              : Column(
-                  children: [
-                    _summaryCardDashboard(
-                      title: "Total Orders",
-                      value: totalOrdersCount.toString(),
-                      color: const Color(0xFF9F342C),
-                      icon: Icons.receipt_long,
-                    ),
-                    const SizedBox(height: 12),
-                    _summaryCardDashboard(
-                      title: "Paid",
-                      value: paidOrdersCount.toString(),
-                      color: const Color(0xFF1B8E3E),
-                      icon: Icons.check_circle,
-                    ),
-                    const SizedBox(height: 12),
-                    _summaryCardDashboard(
-                      title: "Unpaid",
-                      value: unpaidOrdersCount.toString(),
-                      color: Colors.orange,
-                      icon: Icons.hourglass_top_rounded,
-                    ),
-                  ],
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              SizedBox(
+                width: boxWidth,
+                child: _summaryCardDashboard(
+                  title: "Total Orders",
+                  value: totalOrdersCount.toString(),
+                  color: const Color(0xFF9F342C),
+                  icon: Icons.receipt_long_rounded,
                 ),
+              ),
+              SizedBox(
+                width: boxWidth,
+                child: _summaryCardDashboard(
+                  title: "Paid",
+                  value: paidOrdersCount.toString(),
+                  color: const Color(0xFF1B8E3E),
+                  icon: Icons.check_circle_rounded,
+                ),
+              ),
+              SizedBox(
+                width: boxWidth,
+                child: _summaryCardDashboard(
+                  title: "Unpaid",
+                  value: unpaidOrdersCount.toString(),
+                  color: const Color(0xFFE58E26),
+                  icon: Icons.pending_actions_rounded,
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -2622,15 +3176,15 @@ class _DashboardTabState extends State<DashboardTab> {
     required IconData icon,
   }) {
     return Container(
-      constraints: const BoxConstraints(minHeight: 80),
-      padding: const EdgeInsets.all(16),
+      constraints: const BoxConstraints(minHeight: 92),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withOpacity(0.15), width: 1.5),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withOpacity(0.16), width: 1.2),
         boxShadow: [
           BoxShadow(
-            color: color.withOpacity(0.05),
+            color: color.withOpacity(0.10),
             blurRadius: 15,
             offset: const Offset(0, 6),
           ),
@@ -2638,7 +3192,6 @@ class _DashboardTabState extends State<DashboardTab> {
       ),
       child: Row(
         children: [
-          // Icon Container
           Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
@@ -2648,7 +3201,6 @@ class _DashboardTabState extends State<DashboardTab> {
             child: Icon(icon, color: color, size: 22),
           ),
           const SizedBox(width: 14),
-          // Text Content
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2657,8 +3209,8 @@ class _DashboardTabState extends State<DashboardTab> {
                 Text(
                   title.toUpperCase(),
                   style: TextStyle(
-                    fontSize: 11,
-                    letterSpacing: 0.5,
+                    fontSize: 10,
+                    letterSpacing: 0.7,
                     color: Colors.grey.shade600,
                     fontWeight: FontWeight.bold,
                   ),
@@ -2670,11 +3222,9 @@ class _DashboardTabState extends State<DashboardTab> {
                   child: Text(
                     value,
                     style: TextStyle(
-                      fontSize: 22,
+                      fontSize: 24,
                       fontWeight: FontWeight.w900,
-                      color: Color(
-                        0xFF2D2D2D,
-                      ), // Darker text for better contrast
+                      color: const Color(0xFF1E1F24),
                       height: 1.1,
                     ),
                   ),
@@ -2691,19 +3241,40 @@ class _DashboardTabState extends State<DashboardTab> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          "Live Orders",
-          style: TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.w800,
-            color: Color(0xFF2D3243),
-          ),
+        Row(
+          children: [
+            const Text(
+              "Live Orders",
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF1E1F24),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF9F342C).withOpacity(0.08),
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: Text(
+                "${orders.length} shown",
+                style: const TextStyle(
+                  color: Color(0xFF9F342C),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 12),
         Container(
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFFE7EAF0)),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withOpacity(0.03),
@@ -2719,9 +3290,10 @@ class _DashboardTabState extends State<DashboardTab> {
               _applySearchFilter();
             },
             decoration: InputDecoration(
-              hintText: "Search by ID or Transaction...",
+              hintText: "Search by order # or transaction...",
               hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
-              prefixIcon: const Icon(Icons.search, color: Color(0xFF9F342C)),
+              prefixIcon: const Icon(Icons.manage_search_rounded,
+                  color: Color(0xFF9F342C)),
               border: InputBorder.none,
               contentPadding: const EdgeInsets.symmetric(vertical: 15),
             ),
@@ -2754,151 +3326,229 @@ class _DashboardTabState extends State<DashboardTab> {
     }
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      sliver: SliverList(
-        delegate: SliverChildBuilderDelegate(
-          (context, index) => _buildOrderListItem(orders[index]),
-          childCount: orders.length,
+      sliver: SliverLayoutBuilder(
+        builder: (context, constraints) {
+          const crossAxisCount = 4;
+          return SliverGrid(
+            delegate: SliverChildBuilderDelegate(
+              (context, index) => _buildOrderGridCard(orders[index]),
+              childCount: orders.length,
+            ),
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: crossAxisCount,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: constraints.crossAxisExtent < 900 ? 0.66 : 0.92,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildOrderGridCard(Map<String, dynamic> order) {
+    final int orderId = _getOrderPk(order);
+    final String orderNumber = _getOrderNumber(order);
+    final String txnId = _extractTxnId(order) ?? 'N/A';
+    final String statusRaw = (order['status'] ?? 'pending').toString();
+    final String status = statusRaw.toLowerCase();
+    final String? imageUrl = order['image_url']?.toString();
+    final String paymentMode = _firstNonEmpty([
+      order["payment_mode"],
+      order["payment_method"],
+      order["paymentMethod"],
+      order["paymentStatus"],
+    ], fallback: "N/A");
+    final DateTime? createdAt = _extractOrderDate(order);
+    final String dateLabel = createdAt != null
+        ? DateFormat('dd MMM yyyy, hh:mm a').format(createdAt.toLocal())
+        : _firstNonEmpty([order["time"], order["created_at"]], fallback: "N/A");
+    final num amount = _extractOrderTotal(order);
+    final double dpr = MediaQuery.of(context).devicePixelRatio;
+    final int thumbCache = (32 * dpr).round().clamp(1, 512);
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Colors.white, Color(0xFFFAF7F3)],
+        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.grey.shade100),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.06),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                if (imageUrl != null && imageUrl.isNotEmpty)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.network(
+                      imageUrl,
+                      width: 32,
+                      height: 32,
+                      fit: BoxFit.cover,
+                      cacheWidth: thumbCache,
+                      cacheHeight: thumbCache,
+                      errorBuilder: (_, __, ___) => Container(
+                        width: 32,
+                        height: 32,
+                        color: Colors.grey.shade100,
+                        child: const Icon(Icons.image_not_supported, size: 14),
+                      ),
+                    ),
+                  )
+                else
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child:
+                        const Icon(Icons.image, color: Colors.grey, size: 14),
+                  ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Order #$orderNumber",
+                        maxLines: 2,
+                        softWrap: true,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        dateLabel,
+                        maxLines: 2,
+                        softWrap: true,
+                        style: TextStyle(
+                          color: Colors.grey.shade500,
+                          fontSize: 9,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 4),
+                _buildGridStatusBadge(
+                  status,
+                  maxWidth: 62,
+                  fontSize: 8,
+                ),
+              ],
+            ),
+            const Divider(height: 18),
+            Row(
+              children: [
+                const Icon(
+                  Icons.receipt_long,
+                  size: 12,
+                  color: Colors.blueGrey,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    "TXN: $txnId",
+                    maxLines: 2,
+                    style: const TextStyle(
+                      fontSize: 9,
+                      color: Colors.blueGrey,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.payments_rounded,
+                    size: 12, color: Colors.grey),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    "Payment: ${paymentMode.toUpperCase()}",
+                    maxLines: 2,
+                    style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
+                  ),
+                ),
+              ],
+            ),
+            const Spacer(),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    "₹${amount.toStringAsFixed(2)}",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 12,
+                      color: Color(0xFF9F342C),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () =>
+                      _printSingleOrder(orderId, orderNumber: orderNumber),
+                  icon: const Icon(
+                    Icons.print_outlined,
+                    color: Color(0xFF9F342C),
+                  ),
+                  tooltip: "Print receipt",
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildOrderListItem(Map<String, dynamic> order) {
-    final int orderId = _getOrderPk(order);
-    final String orderNumber = _getOrderNumber(order);
-    final String txnId = (order['transaction_id'] ?? 'N/A').toString();
-    final String statusRaw = (order['status'] ?? 'pending').toString();
-    final String status = statusRaw.toLowerCase();
-    final bool isPaid =
-        status == "paid" ||
-        status == "success" ||
-        status == "completed" ||
-        status == "delivered";
-    final String? imageUrl = order['image_url']?.toString();
-    final String? itemsLabel = order['items_label']?.toString();
-    final double dpr = MediaQuery.of(context).devicePixelRatio;
-    final int thumbCache = (28 * dpr).round().clamp(1, 256);
+  Widget _buildGridStatusBadge(
+    String status, {
+    double maxWidth = 110,
+    double fontSize = 10,
+  }) {
+    Color color = Colors.grey;
+    if (status.contains("paid") || status.contains("completed")) {
+      color = Colors.green;
+    } else if (status.contains("pending")) {
+      color = Colors.orange;
+    } else if (status.contains("cancel")) {
+      color = Colors.red;
+    }
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade100),
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(6),
       ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        leading: Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: const Color(0xFF9F342C).withOpacity(0.05),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: imageUrl != null && imageUrl.isNotEmpty
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.network(
-                    imageUrl,
-                    width: 28,
-                    height: 28,
-                    fit: BoxFit.cover,
-                    cacheWidth: thumbCache,
-                    cacheHeight: thumbCache,
-                    errorBuilder: (_, __, ___) => const Icon(
-                      Icons.shopping_bag_outlined,
-                      color: Color(0xFF9F342C),
-                    ),
-                  ),
-                )
-              : const Icon(
-                  Icons.shopping_bag_outlined,
-                  color: Color(0xFF9F342C),
-                ),
-        ),
-        title: Text(
-          "Order #$orderNumber",
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                "TXN: $txnId",
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 2),
-              Row(
-                children: [
-                  Text(
-                    "₹${order['total']}  •  ${order['time']}",
-                    style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: isPaid
-                          ? const Color(0xFF1B8E3E).withOpacity(0.12)
-                          : Colors.red.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: isPaid ? const Color(0xFF1B8E3E) : Colors.red,
-                        width: 1,
-                      ),
-                    ),
-                    child: Text(
-                      isPaid ? "PAID" : "UNPAID",
-                      style: TextStyle(
-                        color: isPaid ? const Color(0xFF1B8E3E) : Colors.red,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              if (itemsLabel != null && itemsLabel.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(
-                  "Items: $itemsLabel",
-                  style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ],
-          ),
-        ),
-        trailing: Material(
-          color: Colors.transparent,
-          child: Tooltip(
-            message: "Print receipt",
-            child: InkWell(
-              customBorder: const CircleBorder(),
-              hoverColor: const Color(0xFF9F342C).withOpacity(0.12),
-              splashColor: const Color(0xFF9F342C).withOpacity(0.18),
-              highlightColor: const Color(0xFF9F342C).withOpacity(0.08),
-              onTap: () => _printSingleOrder(orderId, orderNumber: orderNumber),
-              child: Ink(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.grey.shade300),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.print_outlined,
-                  size: 40,
-                  color: Color(0xFF9F342C),
-                ),
-              ),
-            ),
-          ),
+      child: Text(
+        status.replaceAll('_', ' ').toUpperCase(),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: color,
+          fontWeight: FontWeight.bold,
+          fontSize: fontSize,
         ),
       ),
     );
@@ -3001,33 +3651,28 @@ _ParsedOrder _parseOrderDetails(dynamic data) {
         data["order"] ?? data["data"]?["order"] ?? data["data"] ?? data;
     if (raw is Map) order = raw;
   }
-  final List rawItems =
-      (order["order_items"] ??
-              order["items"] ??
-              order["orderItems"] ??
-              dataMap?["order_items"] ??
-              [])
-          as List;
+  final List rawItems = (order["order_items"] ??
+      order["items"] ??
+      order["orderItems"] ??
+      dataMap?["order_items"] ??
+      []) as List;
   final items = rawItems.map<Map<String, dynamic>>((item) {
     final map = item is Map ? item : {};
     final nested = map["item"] is Map ? map["item"] as Map : const {};
     final qty = map["qty"] ?? map["quantity"] ?? map["pivot"]?["quantity"] ?? 1;
-    final price =
-        map["price"] ??
+    final price = map["price"] ??
         map["unit_price"] ??
         map["pivot"]?["price"] ??
         nested["price"] ??
         0;
     final name = map["name"] ?? nested["name"] ?? map["title"] ?? "Item";
-    final image =
-        map["item_photo_url"] ??
+    final image = map["item_photo_url"] ??
         map["image_url"] ??
         map["image"] ??
         nested["item_photo_url"] ??
         nested["image_url"] ??
         nested["image"];
-    final category =
-        map["category_name"] ??
+    final category = map["category_name"] ??
         map["category"] ??
         nested["category_name"] ??
         nested["category"] ??
@@ -3040,8 +3685,7 @@ _ParsedOrder _parseOrderDetails(dynamic data) {
       "image": image?.toString(),
     };
   }).toList();
-  final paymentMode =
-      order["payment_mode"] ??
+  final paymentMode = order["payment_mode"] ??
       order["paymentMethod"] ??
       order["payment_method"] ??
       order["payment_status"] ??

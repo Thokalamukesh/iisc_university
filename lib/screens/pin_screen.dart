@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/admin_api.dart';
+import '../core/kiosk_log.dart';
 import '../screens/admin_dashboard_screens/adim_homescreen.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class PinScreen extends StatefulWidget {
   const PinScreen({super.key});
@@ -14,6 +15,7 @@ class PinScreen extends StatefulWidget {
 
 class _PinScreenState extends State<PinScreen> {
   final TextEditingController _pinCtrl = TextEditingController();
+  static const String _localAdminPin = "9999";
 
   bool loading = false;
   String error = "";
@@ -43,24 +45,44 @@ class _PinScreenState extends State<PinScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
 
+      if (pin == _localAdminPin) {
+        kioskLog('local admin pin accepted (offline bypass)', tag: 'PIN');
+        await prefs.setBool("admin_local_bypass", true);
+        await prefs.remove("admin_token");
+        if (!mounted) return;
+        Navigator.of(context, rootNavigator: true).pop();
+        Navigator.of(context, rootNavigator: true).pushReplacement(
+          MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
+        );
+        return;
+      }
+
       // 🔥 MUST BE BACKEND DEVICE ID
       final deviceId = prefs.getString("device_uuid");
+      kioskLog('verify pin with device_id=$deviceId', tag: 'PIN');
 
 
       if (deviceId == null || deviceId.isEmpty) {
+        kioskLog('device_id missing in prefs', tag: 'PIN');
         throw Exception("Kiosk not registered");
       }
 
       final res = await AdminApi().login(deviceId: deviceId, pin: pin);
+      kioskLog(
+        'login response status=${res.statusCode} body=${res.data}',
+        tag: 'PIN',
+      );
 
       // ✅ SAFE TOKEN EXTRACTION
       final token = res.data?["token"];
       if (token == null || token.toString().isEmpty) {
+        kioskLog('admin token missing in login response', tag: 'PIN');
         throw Exception("Admin token missing");
       }
 
       // 🔐 SAVE ADMIN TOKEN
       await prefs.setString("admin_token", token.toString());
+      await prefs.setBool("admin_local_bypass", false);
 
       if (!mounted) return;
 
@@ -71,7 +93,23 @@ class _PinScreenState extends State<PinScreen> {
       Navigator.of(context, rootNavigator: true).pushReplacement(
         MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
       );
+    } on DioException catch (e) {
+      final status = e.response?.statusCode;
+      final body = e.response?.data;
+      kioskLogError(
+        'PIN login failed: status=$status path=${e.requestOptions.path} body=$body message=${e.message}',
+        tag: 'PIN',
+        error: e,
+        stackTrace: e.stackTrace,
+      );
+      final serverMsg = body is Map
+          ? (body["message"]?.toString().trim() ?? "")
+          : "";
+      if (mounted) {
+        setState(() => error = serverMsg.isNotEmpty ? serverMsg : "Invalid PIN");
+      }
     } catch (e) {
+      kioskLogError('PIN verify error: $e', tag: 'PIN', error: e);
       setState(() => error = "Invalid PIN");
     } finally {
       if (mounted) setState(() => loading = false);

@@ -1,12 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:api_selfxo_project/api/dio_client.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
 import 'package:intl/intl.dart';
-import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
 
 class OrdersHistoryTab extends StatefulWidget {
   const OrdersHistoryTab({super.key});
@@ -27,6 +30,10 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
   List filteredOrders = [];
   _OrderStatusFilter statusFilter = _OrderStatusFilter.all;
   final PrinterService _printerService = PrinterService();
+  final Set<String> _seenPaidOrderKeys = <String>{};
+  final List<Map<String, dynamic>> _pendingPaidSuccessPopups = [];
+  bool _paidOrderPrimed = false;
+  bool _showingPaidSuccessPopup = false;
 
   // Filters
   _DateRangeFilter dateRangeFilter = _DateRangeFilter.today;
@@ -51,7 +58,9 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
 
   void _goToWelcome() {
     Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(
+        builder: (_) => const MainNavigation(orderType: "dine_in"),
+      ),
       (_) => false,
     );
   }
@@ -73,25 +82,26 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
       if (_loadingInFlight && _lastRequestKey == requestKey) {
         return;
       }
-      if (component != null && component.trim().isNotEmpty) {
-      }
+      if (component != null && component.trim().isNotEmpty) {}
 
       final requestId = ++_requestSeq;
       _activeRequestId = requestId;
       _loadingInFlight = true;
       if (mounted) setState(() => loading = true);
 
-      final dio = await DioClient.getAdminDio();
-
       final Map<String, dynamic> body = {
         "dateRange": _dateRangeValue(dateRangeFilter),
         "status": _statusFilterValue(statusFilter),
       };
 
-      final res = await dio.post("admin/orders", data: body);
+      final res = await AdminApi().getOrders(body);
       if (!mounted || requestId != _activeRequestId) return;
 
       final nextOrders = _extractOrders(res.data);
+      kioskLog(
+        'orders load status=${res.statusCode} count=${nextOrders.length} body=$body',
+        tag: 'ADMIN_ORDERS',
+      );
       if (mounted) {
         setState(() {
           allOrders = nextOrders;
@@ -103,7 +113,13 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
       }
       _lastRequestKey = requestKey;
       _hasLoaded = true;
-    } catch (e) {
+    } catch (e, stackTrace) {
+      kioskLogError(
+        'orders load failed: $e',
+        tag: 'ADMIN_ORDERS',
+        error: e,
+        stackTrace: stackTrace,
+      );
       if (mounted && _activeRequestId == _requestSeq) {
         allOrders = [];
         _hasLoaded = false;
@@ -113,6 +129,87 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
         _loadingInFlight = false;
         if (mounted) setState(() => loading = false);
       }
+    }
+  }
+
+  String _paidOrderKey(Map<String, dynamic> order) {
+    final pk = _resolveOrderId(order, orderPk: _getOrderPk(order));
+    if (pk > 0) return "pk:$pk";
+    final label = _getOrderLabel(order);
+    if (label.isNotEmpty) return "order:$label";
+    final txn = _getTxnId(order);
+    if (txn != "N/A" && txn.trim().isNotEmpty) return "txn:$txn";
+    return "";
+  }
+
+  List<Map<String, dynamic>> _collectNewlyPaidOrders(List orders) {
+    final paidOrders = <Map<String, dynamic>>[];
+    final currentPaidKeys = <String>{};
+    final byKey = <String, Map<String, dynamic>>{};
+
+    for (final row in orders) {
+      if (row is! Map) continue;
+      final order = Map<String, dynamic>.from(row);
+      if (!_isPaidStatus(_getStatus(order))) continue;
+      final key = _paidOrderKey(order);
+      if (key.isEmpty) continue;
+      currentPaidKeys.add(key);
+      byKey[key] = order;
+    }
+
+    if (!_paidOrderPrimed) {
+      _seenPaidOrderKeys
+        ..clear()
+        ..addAll(currentPaidKeys);
+      _paidOrderPrimed = true;
+      return const [];
+    }
+
+    final newKeys = currentPaidKeys.difference(_seenPaidOrderKeys);
+    _seenPaidOrderKeys.addAll(currentPaidKeys);
+    for (final key in newKeys) {
+      final order = byKey[key];
+      if (order != null) paidOrders.add(order);
+    }
+    return paidOrders;
+  }
+
+  void _queuePaidSuccessPopups(List<Map<String, dynamic>> orders) {
+    if (orders.isEmpty) return;
+    _pendingPaidSuccessPopups.addAll(orders);
+    if (_showingPaidSuccessPopup) return;
+    unawaited(_drainPaidSuccessPopups());
+  }
+
+  Future<void> _drainPaidSuccessPopups() async {
+    if (_showingPaidSuccessPopup) return;
+    _showingPaidSuccessPopup = true;
+    try {
+      while (_pendingPaidSuccessPopups.isNotEmpty && mounted) {
+        final order = _pendingPaidSuccessPopups.removeAt(0);
+        final resolvedId = _resolveOrderId(order, orderPk: _getOrderPk(order));
+        final fallbackLabel = resolvedId > 0 ? resolvedId.toString() : "-";
+        final orderLabel = _getOrderLabel(order).trim().isNotEmpty
+            ? _getOrderLabel(order).trim()
+            : fallbackLabel;
+        final amountText = "₹${_getAmount(order).toStringAsFixed(2)}";
+        final paymentMethod = _getPaymentMode(order).trim().isNotEmpty
+            ? _getPaymentMode(order)
+            : "N/A";
+        final dateTimeText = _formatOrderDate(order);
+
+        await showPosPaymentSuccessDialog(
+          context,
+          data: PosPaymentSuccessData(
+            orderId: orderLabel,
+            amountPaid: amountText,
+            paymentMethod: paymentMethod,
+            dateTimeText: dateTimeText,
+          ),
+        );
+      }
+    } finally {
+      _showingPaidSuccessPopup = false;
     }
   }
 
@@ -318,14 +415,14 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
                               ),
                               gridDelegate:
                                   SliverGridDelegateWithFixedCrossAxisCount(
-                                    crossAxisCount: crossAxisCount,
-                                    crossAxisSpacing: 10,
-                                    mainAxisSpacing: 10,
-                                    childAspectRatio:
-                                        constraints.crossAxisExtent < 700
+                                crossAxisCount: crossAxisCount,
+                                crossAxisSpacing: 10,
+                                mainAxisSpacing: 10,
+                                childAspectRatio:
+                                    constraints.crossAxisExtent < 700
                                         ? 0.85
                                         : 1.2,
-                                  ),
+                              ),
                             );
                           },
                         ),
@@ -671,8 +768,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
     bool found = false;
     for (final item in items) {
       final qty = item["qty"] is num ? item["qty"] as num : 1;
-      final charge =
-          item["take_away_charge"] ??
+      final charge = item["take_away_charge"] ??
           item["takeaway_charge"] ??
           item["parcel_charge"] ??
           item["parcelCharge"] ??
@@ -829,9 +925,8 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
                 }
               }
               final data = res?.data ?? {};
-              final normalized = data is Map
-                  ? Map<String, dynamic>.from(data)
-                  : {};
+              final normalized =
+                  data is Map ? Map<String, dynamic>.from(data) : {};
               items = _extractOrderItems(normalized);
               if (items.isEmpty) {
                 items = _extractOrderItems(o);
@@ -858,8 +953,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
             (sum, i) => sum + (i["amount"] as num? ?? 0),
           );
           final total = amount > 0 ? amount : subtotal;
-          final bool showDue =
-              _isPendingStatus(status) ||
+          final bool showDue = _isPendingStatus(status) ||
               status.contains("due") ||
               status.contains("unpaid");
 
@@ -1322,8 +1416,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
     if (data == null) return "N/A";
     dynamic raw;
     if (data is Map) {
-      raw =
-          data["order_type"] ??
+      raw = data["order_type"] ??
           data["orderType"] ??
           data["order_mode"] ??
           data["orderMode"] ??
@@ -1334,8 +1427,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
           data["serviceType"];
       if (raw == null && data["order"] is Map) {
         final order = data["order"] as Map;
-        raw =
-            order["order_type"] ??
+        raw = order["order_type"] ??
             order["orderType"] ??
             order["order_mode"] ??
             order["orderMode"] ??
@@ -1421,38 +1513,33 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
       final menuItem = item["menu_item"] is Map
           ? item["menu_item"] as Map
           : item["item"] is Map
-          ? item["item"] as Map
-          : null;
+              ? item["item"] as Map
+              : null;
       final pivot = item["pivot"] is Map ? item["pivot"] as Map : null;
-      final name =
-          item["item_name"] ??
+      final name = item["item_name"] ??
           item["name"] ??
           item["menu_item_name"] ??
           menuItem?["item_name"] ??
           menuItem?["name"] ??
           "Item";
-      final qty =
-          item["quantity"] ??
+      final qty = item["quantity"] ??
           item["qty"] ??
           item["count"] ??
           item["qty_ordered"] ??
           pivot?["quantity"] ??
           1;
-      final price =
-          item["price"] ??
+      final price = item["price"] ??
           item["unit_price"] ??
           item["item_price"] ??
           item["rate"] ??
           pivot?["price"] ??
           menuItem?["price"] ??
           0;
-      final amount =
-          item["amount"] ??
+      final amount = item["amount"] ??
           item["total"] ??
           item["total_price"] ??
           (qty is num ? qty * (price is num ? price : 0) : 0);
-      final category =
-          item["category_name"] ??
+      final category = item["category_name"] ??
           item["category"] ??
           item["item_category"] ??
           menuItem?["category_name"] ??
@@ -1634,8 +1721,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
   }
 
   DateTime? _parseOrderCreatedAt(dynamic o) {
-    final raw =
-        o["created_at"] ??
+    final raw = o["created_at"] ??
         o["order_date"] ??
         o["date"] ??
         o["createdAt"] ??
@@ -1739,8 +1825,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
   }
 
   String _getOrderLabel(dynamic o) {
-    final label =
-        o["order_number"] ??
+    final label = o["order_number"] ??
         o["order_no"] ??
         o["invoice_number"] ??
         o["id"] ??
@@ -1749,8 +1834,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
   }
 
   String _getPaymentMode(dynamic o) {
-    final mode =
-        o["payment_mode"] ??
+    final mode = o["payment_mode"] ??
         o["paymentMethod"] ??
         o["payment_method"] ??
         o["payment_status"] ??
@@ -1759,18 +1843,21 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
   }
 
   String _getStatus(dynamic o) {
-    final status =
-        o["status"] ??
+    final status = o["status"] ??
         o["order_status"] ??
         o["payment_status"] ??
+        o["paymentStatus"] ??
+        o["pickup_status"] ??
+        o["pickupStatus"] ??
+        o["print_status"] ??
+        o["printStatus"] ??
         o["state"] ??
         "";
     return status.toString().trim();
   }
 
   double _getAmount(dynamic o) {
-    final v =
-        o["grand_total"] ??
+    final v = o["grand_total"] ??
         o["total"] ??
         o["amount"] ??
         o["total_amount"] ??
@@ -1780,8 +1867,7 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
   }
 
   String _formatOrderDate(dynamic o) {
-    final raw =
-        o["created_at"] ??
+    final raw = o["created_at"] ??
         o["order_date"] ??
         o["date"] ??
         o["createdAt"] ??
@@ -2055,7 +2141,11 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
     return s.contains("paid") ||
         s.contains("completed") ||
         s.contains("success") ||
-        s.contains("successful");
+        s.contains("successful") ||
+        s.contains("printed") ||
+        s.contains("picked") ||
+        s.contains("fulfilled") ||
+        s.contains("served");
   }
 }
 

@@ -1,39 +1,198 @@
-import 'dart:async';
-
 import 'package:api_selfxo_project/api/dio_client.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:api_selfxo_project/core/device_info.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class AuthService {
   static const bool _enableAuthLogs = true;
-  static const Duration _tokenPollInterval = Duration(seconds: 3);
-  static const Duration _webTokenPollInterval = Duration(milliseconds: 700);
-  static const Duration _tokenPollTimeout = Duration(minutes: 1);
-  static const Duration _webTokenPollTimeout = Duration(seconds: 12);
+  static String? _lastFailureReason;
+
+  static String? get lastFailureReason => _lastFailureReason;
+
+  void _setFailure(String message) {
+    _lastFailureReason = message;
+    _log(message);
+  }
 
   void _log(String message) {
     if (_enableAuthLogs) {
-      kioskLog(message, tag: 'AUTH');
+      kioskLog(message, tag: "AUTH");
     }
+  }
+
+  bool _looksDuplicateError(DioException e) {
+    final status = e.response?.statusCode;
+    final msgRaw = e.response?.data?.toString() ?? e.message ?? "";
+    final msg = msgRaw.toLowerCase();
+    return msg.contains("duplicate") ||
+        msg.contains("already exists") ||
+        msg.contains("already taken") ||
+        msg.contains("device id") ||
+        msg.contains("device_id") ||
+        msg.contains("kiosks_device_id_unique") ||
+        status == 409 ||
+        status == 422;
+  }
+
+  bool _isInvalidDeviceCandidate(String value) {
+    final id = value.trim().toLowerCase();
+    if (id.isEmpty) return true;
+    return id == "unknown_device" ||
+        id == "unknown_ios" ||
+        id.startsWith("unknown_device_") ||
+        id.startsWith("unknown_ios_");
+  }
+
+  Future<List<String>> _candidateDeviceIds({
+    required SharedPreferences prefs,
+    required String restaurantId,
+  }) async {
+    final scoped = await DeviceInfoUtil.getDeviceId(restaurantId: restaurantId);
+    final base = await DeviceInfoUtil.getBaseDeviceId();
+    final stored = prefs.getString("device_uuid")?.trim() ?? "";
+    final candidates = <String>[
+      scoped.trim(),
+      if (base.trim().isNotEmpty) base.trim(),
+      if (stored.isNotEmpty) stored,
+    ];
+    final deduped = <String>[];
+    for (final id in candidates) {
+      if (_isInvalidDeviceCandidate(id)) continue;
+      if (!deduped.contains(id)) deduped.add(id);
+    }
+    return deduped;
+  }
+
+  Future<Map<String, String>?> _findRestaurantByAnyId(String value) async {
+    final needle = value.trim().toLowerCase();
+    if (needle.isEmpty) return null;
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 8),
+        receiveTimeout: const Duration(seconds: 10),
+        headers: const {"Accept": "application/json"},
+        validateStatus: (status) => status != null && status < 500,
+      ),
+    );
+    final endpoints = <String>[
+      WebApiConfig.allRestaurantsUrl,
+      "https://gitam.sirixo.com/api/all-restaurants",
+      "https://selfpos.sirixo.com/api/all-restaurants",
+    ];
+    for (final endpoint in endpoints) {
+      try {
+        final res = await dio.get(endpoint);
+        if ((res.statusCode ?? 0) >= 400) continue;
+        final data = res.data;
+        final rawList = data is List
+            ? data
+            : (data is Map
+                ? (data["data"] ?? data["restaurants"] ?? data["items"])
+                : null);
+        if (rawList is! List) continue;
+        for (final item in rawList.whereType<Map>()) {
+          final mapped = item.map((k, v) => MapEntry("$k", "$v"));
+          final id = (mapped["id"] ?? "").trim().toLowerCase();
+          final hash = (mapped["hash"] ?? "").trim().toLowerCase();
+          final name = (mapped["name"] ?? "").trim();
+          if (needle == id || needle == hash) {
+            return {
+              "id": mapped["id"]?.trim() ?? "",
+              "hash": mapped["hash"]?.trim() ?? "",
+              "name": name,
+            };
+          }
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<List<String>> _resolveRegistrationRestaurantKeys({
+    required SharedPreferences prefs,
+    required String restaurantId,
+  }) async {
+    final keys = <String>[];
+    void addKey(String? raw) {
+      final value = raw?.trim() ?? "";
+      if (value.isEmpty) return;
+      if (!keys.contains(value)) keys.add(value);
+    }
+
+    final storedId = prefs.getString("restaurant_id")?.trim() ?? "";
+    final storedHash = prefs.getString("restaurant_hash")?.trim() ?? "";
+    final normalized = restaurantId.trim();
+    addKey(storedId);
+    addKey(storedHash);
+    addKey(normalized);
+
+    final lookupCandidates = <String>[
+      if (storedHash.isNotEmpty) storedHash,
+      if (normalized.isNotEmpty) normalized,
+      if (storedId.isNotEmpty) storedId,
+    ];
+    for (final candidate in lookupCandidates) {
+      final matched = await _findRestaurantByAnyId(candidate);
+      if (matched == null) continue;
+      final id = matched["id"]?.trim() ?? "";
+      final hash = matched["hash"]?.trim() ?? "";
+      final name = matched["name"]?.trim() ?? "";
+      if (id.isNotEmpty) await prefs.setString("restaurant_id", id);
+      if (hash.isNotEmpty) await prefs.setString("restaurant_hash", hash);
+      if (name.isNotEmpty) await prefs.setString("restaurant_name", name);
+      // Try id first for current backend path, then hash fallback.
+      addKey(id);
+      addKey(hash);
+      break;
+    }
+
+    // Preserve deterministic preference: numeric id before hash-like keys.
+    keys.sort((a, b) {
+      final aIsNumeric = RegExp(r'^\d+$').hasMatch(a);
+      final bIsNumeric = RegExp(r'^\d+$').hasMatch(b);
+      if (aIsNumeric == bIsNumeric) return 0;
+      return aIsNumeric ? -1 : 1;
+    });
+    return keys;
   }
 
   Future<bool> initializeKiosk({bool force = false}) async {
     try {
+      _lastFailureReason = null;
       final prefs = await SharedPreferences.getInstance();
 
       final restaurantId = prefs.getString("restaurant_id");
       if (restaurantId == null || restaurantId.isEmpty) {
-        _log("❌ Restaurant ID missing");
+        _setFailure("Restaurant ID missing");
         return false;
       }
-
-      // 🔥 IMPORTANT CHANGE IS HERE
-      final deviceId = await DeviceInfoUtil.getDeviceId(
+      final registrationRestaurantKeys =
+          await _resolveRegistrationRestaurantKeys(
+        prefs: prefs,
         restaurantId: restaurantId,
       );
+      if (registrationRestaurantKeys.isEmpty) {
+        _setFailure("Restaurant key resolution failed");
+        return false;
+      }
+      _log("initializeKiosk(force: $force) restaurant_id=$restaurantId");
+      _log(
+        "register payload restaurant_keys=$registrationRestaurantKeys "
+        "(original=$restaurantId)",
+      );
+      final deviceIds = await _candidateDeviceIds(
+        prefs: prefs,
+        restaurantId: restaurantId,
+      );
+      if (deviceIds.isEmpty) {
+        _setFailure("Device ID resolution failed");
+        return false;
+      }
+      _log("resolved candidate device_ids=$deviceIds");
+      await prefs.setString("device_uuid", deviceIds.first);
+      await prefs.setString("device_id", deviceIds.first);
 
       if (force) {
         _log("🧹 Force mode → clearing old kiosk token");
@@ -50,78 +209,91 @@ class AuthService {
 
       final dio = DioClient.getDio();
 
-      try {
-        _log("🔄 Registering kiosk for restaurant: $restaurantId");
-
-        final res = await dio.post(
-          "kiosks/register",
-          data: {
-            "device_id": deviceId,
-            "name": "Kiosk Device",
-            "restaurant_id": restaurantId,
-          },
-        );
-
-        final status = res.statusCode ?? 0;
-        final responseBody = res.data?.toString() ?? "";
-        final responseBodyLower = responseBody.toLowerCase();
-        final bool looksDuplicate = responseBodyLower.contains("duplicate") ||
-            responseBodyLower.contains("already exists") ||
-            responseBodyLower.contains("already taken") ||
-            responseBodyLower.contains("device id") ||
-            responseBodyLower.contains("device_id") ||
-            responseBodyLower.contains("kiosks_device_id_unique") ||
-            status == 409 ||
-            status == 422;
-
-        if (status >= 400) {
-          if (looksDuplicate) {
-            _log("⚠️ Device already exists → fetching token");
-            return await _waitForExistingToken(deviceId);
-          }
-          _log("❌ Register failed with status $status: $responseBody");
-          return false;
-        }
-
-        final token = res.data?["token"];
-        if (token == null || token.toString().isEmpty) {
-          _log("❌ Token missing in register response");
-          return await _waitForExistingToken(deviceId);
-        }
-
-        await prefs.setString("auth_token", token.toString());
-        _log("✅ Kiosk registered & token saved");
-        return true;
-      } on DioException catch (e) {
-        final status = e.response?.statusCode;
-        final msgRaw = e.response?.data?.toString() ?? e.message ?? "";
-        final msg = msgRaw.toLowerCase();
-
-        final bool looksDuplicate = msg.contains("duplicate") ||
-            msg.contains("already exists") ||
-            msg.contains("already taken") ||
-            msg.contains("device id") ||
-            msg.contains("device_id") ||
-            msg.contains("kiosks_device_id_unique") ||
-            status == 409 ||
-            status == 422;
-
-        if (looksDuplicate) {
-          _log("⚠️ Device already exists → fetching token");
-          return await _waitForExistingToken(deviceId);
-        }
-
-        final recovered = await _waitForExistingToken(deviceId);
-        if (recovered) {
-          _log("✅ Recovered kiosk token after register error");
+      for (final deviceId in deviceIds) {
+        final tokenRecovered = await _fetchExistingToken(deviceId);
+        if (tokenRecovered) {
+          await prefs.setString("device_uuid", deviceId);
+          await prefs.setString("device_id", deviceId);
           return true;
         }
-
-        _log("❌ Register failed: ${e.response?.data}");
-        return false;
       }
+
+      String? lastError;
+      for (final deviceId in deviceIds) {
+        for (final registrationRestaurantId in registrationRestaurantKeys) {
+          try {
+            _log(
+              "🔄 Registering kiosk for restaurant: $registrationRestaurantId "
+              "with device_id=$deviceId",
+            );
+
+            final res = await dio.post(
+              "kiosks/register",
+              data: {
+                "device_id": deviceId,
+                "name": "Kiosk Device",
+                "restaurant_id": registrationRestaurantId,
+              },
+            );
+            _log(
+              "register response status=${res.statusCode} body=${res.data}",
+            );
+
+            final token = res.data?["token"];
+            if (token == null || token.toString().isEmpty) {
+              lastError =
+                  "Token missing in register response for device_id=$deviceId";
+              continue;
+            }
+
+            await prefs.setString("auth_token", token.toString());
+            await prefs.setString("device_uuid", deviceId);
+            await prefs.setString("device_id", deviceId);
+            _lastFailureReason = null;
+            _log("✅ Kiosk registered & token saved");
+            return true;
+          } on DioException catch (e) {
+            final status = e.response?.statusCode;
+            final msgRaw = e.response?.data?.toString() ?? e.message ?? "";
+            _log(
+              "register exception status=$status path=${e.requestOptions.path} "
+              "device_id=$deviceId restaurant_key=$registrationRestaurantId "
+              "message=${e.message} body=$msgRaw",
+            );
+
+            if (_looksDuplicateError(e)) {
+              _log(
+                "⚠️ Device already exists for device_id=$deviceId → fetching token",
+              );
+              final recovered = await _fetchExistingToken(deviceId);
+              if (recovered) {
+                await prefs.setString("device_uuid", deviceId);
+                await prefs.setString("device_id", deviceId);
+                return true;
+              }
+            }
+            lastError =
+                "Register failed for device_id=$deviceId restaurant_key="
+                "$registrationRestaurantId: $msgRaw";
+            // If backend says selected key is invalid, let next key try.
+            final bodyText = msgRaw.toLowerCase();
+            final keyLooksInvalid =
+                bodyText.contains("branches") && bodyText.contains("on null");
+            if (keyLooksInvalid) {
+              continue;
+            }
+          } catch (e) {
+            lastError =
+                "Register failed for device_id=$deviceId restaurant_key="
+                "$registrationRestaurantId: $e";
+            continue;
+          }
+        }
+      }
+      _setFailure(lastError ?? "Register failed");
+      return false;
     } catch (e) {
-      _log("❌ INIT ERROR: $e");
+      _setFailure("INIT ERROR: $e");
       return false;
     }
   }
@@ -130,38 +302,24 @@ class AuthService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final dio = DioClient.getDio();
+      _log("fetch existing token for device_id=$deviceId");
 
       final res = await dio.get("kiosks/getToken/$deviceId");
-      final status = res.statusCode ?? 0;
-      if (status >= 400) {
-        _log("❌ Failed to fetch existing token: HTTP $status");
-        return false;
-      }
+      _log("getToken response status=${res.statusCode} body=${res.data}");
       final token = res.data?["token"];
 
       if (token == null || token.toString().isEmpty) {
-        _log("❌ Failed to fetch existing token");
+        _setFailure("Failed to fetch existing token");
         return false;
       }
 
       await prefs.setString("auth_token", token.toString());
+      _lastFailureReason = null;
       _log("✅ Existing kiosk token refreshed");
       return true;
     } catch (e) {
-      _log("❌ TOKEN FETCH ERROR: $e");
+      _setFailure("TOKEN FETCH ERROR: $e");
       return false;
     }
-  }
-
-  Future<bool> _waitForExistingToken(String deviceId) async {
-    const timeout = kIsWeb ? _webTokenPollTimeout : _tokenPollTimeout;
-    const pollInterval = kIsWeb ? _webTokenPollInterval : _tokenPollInterval;
-    final endAt = DateTime.now().add(timeout);
-    while (DateTime.now().isBefore(endAt)) {
-      final ok = await _fetchExistingToken(deviceId);
-      if (ok) return true;
-      await Future.delayed(pollInterval);
-    }
-    return false;
   }
 }

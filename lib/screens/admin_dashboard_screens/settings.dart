@@ -1,16 +1,14 @@
-import 'package:api_selfxo_project/background_image/background_image.dart';
-import 'package:api_selfxo_project/core/logout_helper.dart';
 import 'package:api_selfxo_project/printer/epson_usb_printer_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/core/order_utils.dart';
+import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -118,7 +116,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _goToWelcome() {
     Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(
+        builder: (_) => const MainNavigation(orderType: "dine_in"),
+      ),
       (_) => false,
     );
   }

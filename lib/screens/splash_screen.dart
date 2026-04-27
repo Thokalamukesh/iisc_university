@@ -1,8 +1,8 @@
 import 'dart:async';
 
-import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -32,12 +32,11 @@ class _SplashScreenState extends State<SplashScreen> {
     _initStarted = true;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final restaurantId = prefs.getString("restaurant_id");
       final setupDone = prefs.getBool("kiosk_setup_done") ?? false;
       if (!mounted) return;
 
       if (_didNavigate) return;
-      if (restaurantId == null || restaurantId.trim().isEmpty) {
+      if (!setupDone) {
         _didNavigate = true;
         Navigator.pushReplacement(
           context,
@@ -55,8 +54,7 @@ class _SplashScreenState extends State<SplashScreen> {
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) =>
-              setupDone ? const WelcomeScreen() : const RegisterKioskScreen(),
+          builder: (_) => const AdminHomeScreen(),
         ),
       );
     } catch (e) {}

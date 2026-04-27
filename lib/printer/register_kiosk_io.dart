@@ -1,10 +1,10 @@
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
-import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/order_utils.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:api_selfxo_project/printer/epson_usb_printer_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/screens/register_screen_io.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -259,7 +259,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+        MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
       );
     } finally {
       _finishing = false;

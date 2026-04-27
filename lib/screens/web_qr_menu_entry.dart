@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/screens/register_screen.dart';
 import 'package:api_selfxo_project/services/auth_service.dart';
@@ -26,6 +27,66 @@ class WebQrMenuEntryScreen extends StatefulWidget {
 class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
   bool _loading = true;
   String? _errorMessage;
+
+  String _normalizedKey(String raw) =>
+      raw.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+  ({String id, String? hash, String? name})? _resolveRestaurantIdentityFromList(
+    String raw,
+    List<Map<String, dynamic>> restaurants,
+  ) {
+    final needle = _normalizedKey(raw);
+    if (needle.isEmpty) return null;
+
+    for (final item in restaurants) {
+      final id = item["id"]?.toString().trim() ?? "";
+      final hash = item["hash"]?.toString().trim() ?? "";
+      final name = item["name"]?.toString().trim() ?? "";
+      if (id.isEmpty && hash.isEmpty) continue;
+      final idKey = _normalizedKey(id);
+      final hashKey = _normalizedKey(hash);
+      final nameKey = _normalizedKey(name);
+      if (needle == idKey || needle == hashKey || needle == nameKey) {
+        final canonicalId = id.isNotEmpty ? id : hash;
+        return (
+          id: canonicalId,
+          hash: hash.isNotEmpty ? hash : null,
+          name: name.isNotEmpty ? name : null,
+        );
+      }
+    }
+    return null;
+  }
+
+  String? _restaurantMapId(Map<String, dynamic>? restaurant) {
+    if (restaurant == null) return null;
+    final v = restaurant["id"]?.toString().trim();
+    if (v != null && v.isNotEmpty) return v;
+    return null;
+  }
+
+  String? _restaurantMapHash(Map<String, dynamic>? restaurant) {
+    if (restaurant == null) return null;
+    final v = restaurant["hash"]?.toString().trim();
+    if (v != null && v.isNotEmpty) return v;
+    return null;
+  }
+
+  bool _restaurantMatchesSelection({
+    required Map<String, dynamic>? restaurant,
+    required String selectedId,
+    required String? selectedHash,
+  }) {
+    final rid = _normalizedKey(_restaurantMapId(restaurant) ?? "");
+    final rhash = _normalizedKey(_restaurantMapHash(restaurant) ?? "");
+    final sid = _normalizedKey(selectedId);
+    final shash = _normalizedKey(selectedHash ?? "");
+
+    if (rid.isEmpty && rhash.isEmpty) return true;
+    if (sid.isNotEmpty && (sid == rid || sid == rhash)) return true;
+    if (shash.isNotEmpty && (shash == rid || shash == rhash)) return true;
+    return false;
+  }
 
   String _extractErrorMessage(Object error) {
     if (error is DioException) {
@@ -62,10 +123,38 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final previousRestaurantId = prefs.getString("restaurant_id");
-      final restaurantChanged = previousRestaurantId != null &&
-          previousRestaurantId.trim().isNotEmpty &&
-          previousRestaurantId.trim() != widget.restaurantId.trim();
+      final previousRestaurantId =
+          prefs.getString("restaurant_id")?.trim() ?? "";
+      final previousRestaurantHash =
+          prefs.getString("restaurant_hash")?.trim() ?? "";
+
+      String resolvedRestaurantId = widget.restaurantId.trim();
+      String? resolvedRestaurantHash;
+      String? resolvedRestaurantName;
+
+      try {
+        final restaurants = await KioskApi()
+            .getAllRestaurantsWeb()
+            .timeout(const Duration(seconds: 8));
+        final matched = _resolveRestaurantIdentityFromList(
+          resolvedRestaurantId,
+          restaurants,
+        );
+        if (matched != null) {
+          resolvedRestaurantId = matched.id.trim();
+          resolvedRestaurantHash = matched.hash?.trim();
+          resolvedRestaurantName = matched.name?.trim();
+        }
+      } catch (_) {}
+
+      final currentRestaurantKey =
+          resolvedRestaurantHash?.trim().isNotEmpty == true
+              ? resolvedRestaurantHash!.trim()
+              : resolvedRestaurantId;
+
+      final restaurantChanged = previousRestaurantId.trim().isNotEmpty &&
+          previousRestaurantId.trim() != currentRestaurantKey &&
+          previousRestaurantHash.trim() != currentRestaurantKey;
 
       if (restaurantChanged) {
         await prefs.remove("auth_token");
@@ -75,8 +164,20 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
         await prefs.remove("gst_number");
       }
 
-      await prefs.setString("restaurant_id", widget.restaurantId.trim());
+      await prefs.setString("restaurant_id", resolvedRestaurantId);
+      if (resolvedRestaurantHash != null && resolvedRestaurantHash.isNotEmpty) {
+        await prefs.setString("restaurant_hash", resolvedRestaurantHash);
+      }
+      if (resolvedRestaurantName != null && resolvedRestaurantName.isNotEmpty) {
+        await prefs.setString("restaurant_name", resolvedRestaurantName);
+      }
       await prefs.setBool("kiosk_setup_done", true);
+      kioskLog(
+        'web bootstrap restaurant resolved '
+        'incoming=${widget.restaurantId} id=$resolvedRestaurantId '
+        'hash=${resolvedRestaurantHash ?? "-"} changed=$restaurantChanged',
+        tag: 'WEB_BOOTSTRAP',
+      );
 
       final ok = await AuthService().initializeKiosk(force: restaurantChanged);
       if (!ok) {
@@ -86,12 +187,33 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
       Map<String, dynamic>? restaurant;
       Map<String, dynamic>? kioskSettings;
       try {
-        final res = await KioskApi()
+        Response res = await KioskApi()
             .getRestaurantData()
             .timeout(const Duration(seconds: 4));
-        final bundle = _extractRestaurantBundle(res.data);
+        var bundle = _extractRestaurantBundle(res.data);
         restaurant = bundle.restaurant;
         kioskSettings = bundle.kioskSettings;
+
+        final tokenMatchesSelection = _restaurantMatchesSelection(
+          restaurant: restaurant,
+          selectedId: resolvedRestaurantId,
+          selectedHash: resolvedRestaurantHash,
+        );
+        if (!tokenMatchesSelection) {
+          kioskLog(
+            'token restaurant mismatch -> reinitializing kiosk token',
+            tag: 'WEB_BOOTSTRAP',
+          );
+          final retried = await AuthService().initializeKiosk(force: true);
+          if (retried) {
+            res = await KioskApi()
+                .getRestaurantData()
+                .timeout(const Duration(seconds: 4));
+            bundle = _extractRestaurantBundle(res.data);
+            restaurant = bundle.restaurant;
+            kioskSettings = bundle.kioskSettings;
+          }
+        }
         await _applyRestaurantMeta(
           prefs: prefs,
           restaurant: restaurant,

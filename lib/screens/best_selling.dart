@@ -266,44 +266,30 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
             ),
             child: Column(
               children: [
-                if (isTablet)
-                  SizedBox(
-                    height: 155,
-                    child: PageView.builder(
-                      key: ValueKey(_viewportFraction),
-                      controller: _pageController,
-                      padEnds: false,
-                      itemCount: displayedProducts.length,
-                      onPageChanged: (i) {
-                        final next = i;
-                        if (next != currentIndex && mounted) {
-                          setState(() => currentIndex = next);
-                        }
-                      },
-                      itemBuilder: (_, i) => _buildProductCard(
-                        displayedProducts[i],
-                        true,
-                      ),
+                SizedBox(
+                  height: isTablet ? 155 : 112,
+                  child: PageView.builder(
+                    key: ValueKey(
+                      "best-selling-${isTablet ? 'tablet' : 'mobile'}-$_viewportFraction",
                     ),
-                  )
-                else
-                  SizedBox(
-                    height: 112,
-                    child: ListView.separated(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      scrollDirection: Axis.horizontal,
-                      physics: const ClampingScrollPhysics(),
-                      itemCount: displayedProducts.length,
-                      separatorBuilder: (_, __) => const SizedBox(width: 8),
-                      itemBuilder: (_, i) => SizedBox(
-                        width: (screenWidth * 0.56).clamp(160.0, 210.0),
-                        child: _buildProductCard(displayedProducts[i], false),
-                      ),
+                    controller: _pageController,
+                    padEnds: false,
+                    itemCount: displayedProducts.length,
+                    onPageChanged: (i) {
+                      final next = i;
+                      if (next != currentIndex && mounted) {
+                        setState(() => currentIndex = next);
+                      }
+                    },
+                    itemBuilder: (_, i) => _buildProductCard(
+                      displayedProducts[i],
+                      isTablet,
                     ),
                   ),
-                if (isTablet) ...[
+                ),
+                if (displayedProducts.length > 1) ...[
                   const SizedBox(height: 12),
-                  _buildDots(displayedProducts.length, true),
+                  _buildDots(displayedProducts.length, isTablet),
                 ],
               ],
             ),
@@ -656,12 +642,18 @@ class _BestSellingWidgetState extends State<BestSellingWidget> {
         (i) => AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           margin: const EdgeInsets.symmetric(horizontal: 4),
-          width: currentIndex == i ? (isTablet ? 24 : 18) : 8,
-          height: 8,
+          width: currentIndex == i ? (isTablet ? 24 : 16) : (isTablet ? 9 : 7),
+          height: isTablet ? 8 : 7,
           decoration: BoxDecoration(
             color: currentIndex == i
-                ? const Color.fromARGB(255, 255, 255, 255)
-                : const Color.fromARGB(255, 214, 199, 151),
+                ? const Color(0xFF9F342C)
+                : Colors.white.withOpacity(0.75),
+            border: Border.all(
+              color: currentIndex == i
+                  ? const Color(0xFF9F342C)
+                  : const Color(0xFFD9C8A8),
+              width: 1,
+            ),
             borderRadius: BorderRadius.circular(10),
           ),
         ),

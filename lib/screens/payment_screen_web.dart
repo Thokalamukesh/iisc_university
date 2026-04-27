@@ -2,7 +2,6 @@ import 'dart:async';
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 
-import 'package:api_selfxo_project/background_image/background_image.dart';
 import 'package:api_selfxo_project/core/device_info.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
@@ -46,6 +45,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
   Timer? _paymentTimer;
   Timer? _timeoutTimer;
   Timer? _paymentFailTimer;
+  StreamSubscription<html.Event>? _visibilitySub;
 
   bool _loading = true;
   bool _started = false;
@@ -53,6 +53,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
   bool _receiptPrinted = false;
   bool _openedSuccessScreen = false;
   bool _waitingForPaymentCompletion = false;
+  bool _tabHiddenPause = false;
   String _selectedPaymentLabel = "UPI";
 
   String? _errorMessage;
@@ -66,10 +67,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
     super.initState();
     IdleTimer.pause();
     KioskMemoryService.instance.pause();
+    _visibilitySub = html.document.onVisibilityChange.listen((_) {
+      _handleVisibilityChanged();
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _preloadRestaurantData();
       _startPaymentFlow();
       _startTimeout();
+      _handleVisibilityChanged();
     });
   }
 
@@ -142,13 +147,6 @@ class _PaymentScreenState extends State<PaymentScreen> {
       final qrRes = await KioskApi().generateQr(orderId: _orderId!);
 
       _qrData = _extractQrString(qrRes.data);
-      if (_qrData != null) {
-        final uri = Uri.tryParse(_qrData!);
-        final pn = uri?.queryParameters["pn"];
-        if (pn != null && pn.trim().isNotEmpty) {
-          _displayRestaurantName = pn.toUpperCase();
-        }
-      }
 
       final amountPaise = _extractAmountPaise(qrRes.data);
       _payableAmount = amountPaise != null
@@ -363,7 +361,32 @@ class _PaymentScreenState extends State<PaymentScreen> {
     setState(() {
       _waitingForPaymentCompletion = false;
     });
+
+    bool alreadyPrinted = false;
+    try {
+      final orderId = _orderId;
+      if (orderId != null) {
+        final details = await KioskApi().getOrderDetails(orderId);
+        alreadyPrinted = _hasPrintedMarker(details.data, 7);
+      }
+    } catch (_) {}
+
+    if (!_active || !mounted) return;
     _openedSuccessScreen = true;
+    if (alreadyPrinted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => _WebPrintReadyScreen(
+            orderNumber: _orderId!,
+            restaurantName: _displayRestaurantName,
+            source: 'web_order_already_printed',
+          ),
+        ),
+      );
+      return;
+    }
+
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
@@ -375,6 +398,71 @@ class _PaymentScreenState extends State<PaymentScreen> {
         ),
       ),
     );
+  }
+
+  bool _hasPrintedMarker(dynamic value, int depth) {
+    if (value == null || depth <= 0) return false;
+
+    bool looksPrinted(dynamic raw) {
+      if (raw == true) return true;
+      if (raw is num) return raw > 0;
+      final s = raw?.toString().trim().toLowerCase() ?? '';
+      if (s.isEmpty) return false;
+      return s.contains('printed') ||
+          s.contains('print_success') ||
+          s.contains('receipt_printed') ||
+          s.contains('served') ||
+          s.contains('picked') ||
+          s.contains('fulfilled') ||
+          s.contains('completed');
+    }
+
+    if (value is Map) {
+      for (final key in const [
+        'is_printed',
+        'printed',
+        'print_status',
+        'printStatus',
+        'receipt_printed',
+        'receiptPrinted',
+        'printed_at',
+        'printedAt',
+        'print_count',
+        'printCount',
+        'status',
+        'order_status',
+        'orderStatus',
+        'pickup_status',
+        'pickupStatus',
+      ]) {
+        if (value.containsKey(key) && looksPrinted(value[key])) {
+          return true;
+        }
+      }
+      for (final nestedKey in const [
+        'data',
+        'order',
+        'details',
+        'order_details',
+        'orderDetails',
+        'payload',
+        'result',
+      ]) {
+        if (value.containsKey(nestedKey) &&
+            _hasPrintedMarker(value[nestedKey], depth - 1)) {
+          return true;
+        }
+      }
+      for (final entry in value.entries) {
+        if (_hasPrintedMarker(entry.value, depth - 1)) return true;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        if (_hasPrintedMarker(item, depth - 1)) return true;
+      }
+    }
+
+    return false;
   }
 
   void _handleError(String msg) {
@@ -429,7 +517,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         timer.cancel();
         Navigator.pushAndRemoveUntil(
           context,
-          MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+          MaterialPageRoute(builder: (_) => const UserIdScreen()),
           (route) => false,
         );
       } else {
@@ -515,7 +603,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
   bool _launchUpiInBrowser(String target) {
     try {
       final anchor = html.AnchorElement(href: target)
-        ..target = "_self"
+        ..target = "_blank"
         ..style.display = "none";
       html.document.body?.append(anchor);
       anchor.click();
@@ -638,7 +726,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                             MaterialPageRoute(
                               builder: (_) => isStartAgain
                                   ? const UserIdScreen()
-                                  : const WelcomeScreen(),
+                                  : const UserIdScreen(),
                             ),
                             (route) => false,
                           );
@@ -671,6 +759,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
   @override
   void dispose() {
     _active = false;
+    _visibilitySub?.cancel();
     _paymentTimer?.cancel();
     _timeoutTimer?.cancel();
     _countdownTimer?.cancel();
@@ -680,6 +769,35 @@ class _PaymentScreenState extends State<PaymentScreen> {
       KioskMemoryService.instance.resume();
     }
     super.dispose();
+  }
+
+  void _handleVisibilityChanged() {
+    if (!_active || !mounted || !_started) return;
+    final hidden = html.document.hidden ?? false;
+
+    if (hidden) {
+      _tabHiddenPause = true;
+      _paymentTimer?.cancel();
+      _timeoutTimer?.cancel();
+      _countdownTimer?.cancel();
+      _paymentFailTimer?.cancel();
+      return;
+    }
+
+    if (!_tabHiddenPause) return;
+    _tabHiddenPause = false;
+    if (_receiptPrinted || _openedSuccessScreen) return;
+
+    if (_errorMessage != null) {
+      _startFailAutoClose();
+      return;
+    }
+
+    _startCountdown();
+    _startTimeout();
+    if (_orderId != null && !_loading) {
+      _startPaymentPolling();
+    }
   }
 
   @override
@@ -924,26 +1042,21 @@ class _WebPaymentLayout extends StatelessWidget {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(20, topPadding, 20, bottomPadding),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 720),
-          child: SizedBox(
-            width: double.infinity,
-            height: availableHeight,
-            child: _WebPaymentMainCard(
-              remainingSeconds: remainingSeconds,
-              restaurantName: restaurantName,
-              amountLabel: amountLabel,
-              paymentQrData: paymentQrData,
-              paymentHint: paymentHint,
-              onGooglePay: onGooglePay,
-              onPhonePe: onPhonePe,
-              onPaytm: onPaytm,
-              onOtherUpi: onOtherUpi,
-              onCancel: onCancel,
-              onStartAgain: onStartAgain,
-            ),
-          ),
+      child: SizedBox(
+        width: double.infinity,
+        height: availableHeight,
+        child: _WebPaymentMainCard(
+          remainingSeconds: remainingSeconds,
+          restaurantName: restaurantName,
+          amountLabel: amountLabel,
+          paymentQrData: paymentQrData,
+          paymentHint: paymentHint,
+          onGooglePay: onGooglePay,
+          onPhonePe: onPhonePe,
+          onPaytm: onPaytm,
+          onOtherUpi: onOtherUpi,
+          onCancel: onCancel,
+          onStartAgain: onStartAgain,
         ),
       ),
     );
@@ -1171,12 +1284,11 @@ class _WebPaymentMainCard extends StatelessWidget {
               ),
               SizedBox(height: compact ? 14 : 18),
               Expanded(
-                child: Container(
-                  padding: EdgeInsets.all(sectionPadding),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(28),
-                    border: Border.all(color: const Color(0xFFF0E5D9)),
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: sectionPadding,
+                    vertical: compact ? 2 : 4,
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1202,60 +1314,52 @@ class _WebPaymentMainCard extends StatelessWidget {
                         ),
                       ),
                       SizedBox(height: compact ? 14 : 16),
-                      Expanded(
-                        child: ListView(
-                          padding: EdgeInsets.zero,
-                          physics: const BouncingScrollPhysics(),
-                          children: [
-                            if (paymentQrData != null) ...[
-                              _WebPaymentQrCard(
-                                qrData: paymentQrData!,
-                                amountLabel: amountLabel,
-                                compact: compact,
-                              ),
-                              SizedBox(height: compact ? 12 : 14),
-                            ],
-                            _WebPayAppTile(
-                              title: "Google Pay",
-                              subtitle: "Open Google Pay",
-                              assetPath: "assets/payment_icons/google_pay.svg",
-                              accent: const Color(0xFFEAF2FF),
-                              foreground: const Color(0xFF1A73E8),
-                              compact: compact,
-                              onTap: onGooglePay,
-                            ),
-                            SizedBox(height: compact ? 10 : 12),
-                            _WebPayAppTile(
-                              title: "PhonePe",
-                              subtitle: "Open PhonePe",
-                              assetPath: "assets/payment_icons/phonepe.svg",
-                              accent: const Color(0xFFF4ECFF),
-                              foreground: const Color(0xFF5F259F),
-                              compact: compact,
-                              onTap: onPhonePe,
-                            ),
-                            SizedBox(height: compact ? 10 : 12),
-                            _WebPayAppTile(
-                              title: "Paytm",
-                              subtitle: "Open Paytm",
-                              assetPath: "assets/payment_icons/paytm.svg",
-                              accent: const Color(0xFFEAF8FF),
-                              foreground: const Color(0xFF20336B),
-                              compact: compact,
-                              onTap: onPaytm,
-                            ),
-                            SizedBox(height: compact ? 10 : 12),
-                            _WebPayAppTile(
-                              title: "Open Any UPI",
-                              subtitle: "Open any UPI app",
-                              icon: Icons.account_balance_wallet_rounded,
-                              accent: const Color(0xFFFFF0E5),
-                              foreground: const Color(0xFFB55A21),
-                              compact: compact,
-                              onTap: onOtherUpi,
-                            ),
-                          ],
+                      if (paymentQrData != null) ...[
+                        _WebPaymentQrCard(
+                          qrData: paymentQrData!,
+                          amountLabel: amountLabel,
+                          compact: compact,
                         ),
+                        SizedBox(height: compact ? 12 : 14),
+                      ],
+                      _WebPayAppTile(
+                        title: "Google Pay",
+                        subtitle: "Open Google Pay",
+                        assetPath: "assets/payment_icons/google_pay.svg",
+                        accent: const Color(0xFFEAF2FF),
+                        foreground: const Color(0xFF1A73E8),
+                        compact: compact,
+                        onTap: onGooglePay,
+                      ),
+                      SizedBox(height: compact ? 10 : 12),
+                      _WebPayAppTile(
+                        title: "PhonePe",
+                        subtitle: "Open PhonePe",
+                        assetPath: "assets/payment_icons/phonepe.svg",
+                        accent: const Color(0xFFF4ECFF),
+                        foreground: const Color(0xFF5F259F),
+                        compact: compact,
+                        onTap: onPhonePe,
+                      ),
+                      SizedBox(height: compact ? 10 : 12),
+                      _WebPayAppTile(
+                        title: "Paytm",
+                        subtitle: "Open Paytm",
+                        assetPath: "assets/payment_icons/paytm.svg",
+                        accent: const Color(0xFFEAF8FF),
+                        foreground: const Color(0xFF20336B),
+                        compact: compact,
+                        onTap: onPaytm,
+                      ),
+                      SizedBox(height: compact ? 10 : 12),
+                      _WebPayAppTile(
+                        title: "Open Any UPI",
+                        subtitle: "Open any UPI app",
+                        icon: Icons.account_balance_wallet_rounded,
+                        accent: const Color(0xFFFFF0E5),
+                        foreground: const Color(0xFFB55A21),
+                        compact: compact,
+                        onTap: onOtherUpi,
                       ),
                       SizedBox(height: compact ? 12 : 14),
                       SizedBox(
@@ -1308,6 +1412,7 @@ class _WebPaymentMainCard extends StatelessWidget {
                           ],
                         ),
                       ),
+                      SizedBox(height: compact ? 8 : 12),
                     ],
                   ),
                 ),
@@ -1677,6 +1782,7 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
   Timer? _partialScanResetTimer;
   Timer? _autoReturnTimer;
   Timer? _autoReturnCountdownTimer;
+  Timer? _orderStatePollTimer;
   StreamSubscription<html.KeyboardEvent>? _htmlWindowKeyDownSub;
   StreamSubscription<html.KeyboardEvent>? _htmlWindowKeyPressSub;
   StreamSubscription<html.Event>? _htmlWindowFocusSub;
@@ -1690,7 +1796,9 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
   Timer? _domScannerIdleTimer;
   final StringBuffer _domScannerBuffer = StringBuffer();
   bool _openingPrint = false;
+  bool _printCompleted = false;
   bool _isNavigating = false;
+  bool _checkingRemotePrint = false;
   String? _lastScan;
   String? _printError;
   String _pendingScanPrefix = '';
@@ -1743,6 +1851,7 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     });
     _setupDomScannerCapture();
     _startAutoReturnTimer();
+    _startRemotePrintWatcher();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusScannerInput();
       _logScan('screen ready; expected pickup="$_scanCode"');
@@ -1763,6 +1872,7 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     _partialScanResetTimer?.cancel();
     _autoReturnTimer?.cancel();
     _autoReturnCountdownTimer?.cancel();
+    _orderStatePollTimer?.cancel();
     _htmlWindowKeyDownSub?.cancel();
     _htmlWindowKeyPressSub?.cancel();
     _htmlWindowFocusSub?.cancel();
@@ -1801,6 +1911,101 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
         });
       },
     );
+  }
+
+  void _startRemotePrintWatcher() {
+    _orderStatePollTimer?.cancel();
+    _orderStatePollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_pollRemotePrintedState());
+    });
+    unawaited(_pollRemotePrintedState());
+  }
+
+  Future<void> _pollRemotePrintedState() async {
+    if (!mounted || _isNavigating || _openingPrint || _checkingRemotePrint) {
+      return;
+    }
+    _checkingRemotePrint = true;
+    try {
+      final res = await KioskApi().getOrderDetails(widget.orderNumber);
+      if (!mounted || _isNavigating || _openingPrint) return;
+      if (_hasPrintedMarker(res.data, 7)) {
+        _setScanStatus("Print completed. Opening success page...");
+        await _openPrintSuccessPage(debugSource: 'web_remote_print_detected');
+      }
+    } catch (_) {
+      // Keep polling silently; scanner/tablet print may complete later.
+    } finally {
+      _checkingRemotePrint = false;
+    }
+  }
+
+  bool _hasPrintedMarker(dynamic value, int depth) {
+    if (value == null || depth <= 0) return false;
+
+    bool looksPrinted(dynamic raw) {
+      if (raw == true) return true;
+      if (raw is num) return raw > 0;
+      final s = raw?.toString().trim().toLowerCase() ?? '';
+      if (s.isEmpty) return false;
+      if (s.contains('printed') ||
+          s.contains('print_success') ||
+          s.contains('receipt_printed') ||
+          s.contains('served') ||
+          s.contains('picked') ||
+          s.contains('fulfilled') ||
+          s.contains('completed')) {
+        return true;
+      }
+      return false;
+    }
+
+    if (value is Map) {
+      for (final key in const [
+        'is_printed',
+        'printed',
+        'print_status',
+        'printStatus',
+        'receipt_printed',
+        'receiptPrinted',
+        'printed_at',
+        'printedAt',
+        'print_count',
+        'printCount',
+        'status',
+        'order_status',
+        'orderStatus',
+        'pickup_status',
+        'pickupStatus',
+      ]) {
+        if (value.containsKey(key) && looksPrinted(value[key])) {
+          return true;
+        }
+      }
+      for (final nestedKey in const [
+        'data',
+        'order',
+        'details',
+        'order_details',
+        'orderDetails',
+        'payload',
+        'result',
+      ]) {
+        if (value.containsKey(nestedKey) &&
+            _hasPrintedMarker(value[nestedKey], depth - 1)) {
+          return true;
+        }
+      }
+      for (final entry in value.entries) {
+        if (_hasPrintedMarker(entry.value, depth - 1)) return true;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        if (_hasPrintedMarker(item, depth - 1)) return true;
+      }
+    }
+
+    return false;
   }
 
   String _formatAutoReturn() {
@@ -2379,7 +2584,8 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     });
 
     if (_matchesExpectedCode(value)) {
-      _logScan('$source scan matched pickup code for order ${widget.orderNumber}');
+      _logScan(
+          '$source scan matched pickup code for order ${widget.orderNumber}');
       _setScanStatus("Scanner matched. Printing receipt...");
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2444,9 +2650,11 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
 
     setState(() {
       _openingPrint = true;
+      _printCompleted = false;
       _printError = null;
-      _scanStatusText =
-          fromRetry ? "Retrying print..." : "Scanner matched. Printing receipt...";
+      _scanStatusText = fromRetry
+          ? "Retrying print..."
+          : "Scanner matched. Printing receipt...";
     });
 
     if (!fromRetry) {
@@ -2460,10 +2668,10 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
       );
     }
 
-    await Future<void>.delayed(const Duration(milliseconds: 350));
     if (!mounted) return;
 
     bool printed = false;
+    bool localPrinted = false;
     Object? printError;
 
     Future<void> tryPrint(
@@ -2474,6 +2682,9 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
       try {
         await printerCall();
         printed = true;
+        if (source == 'tablet-flow') {
+          localPrinted = true;
+        }
         _logScan('print success via $source');
       } catch (e) {
         printError = e;
@@ -2490,43 +2701,44 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
       );
     }, 'tablet-flow');
 
-    await tryPrint(() async {
-      await KioskApi().printReceipt(widget.orderNumber);
-    }, 'backend-printReceipt');
+    if (localPrinted) {
+      final alreadyMarkedPrinted = await _waitForPrintedMarker(
+        retries: 2,
+        delay: const Duration(milliseconds: 280),
+      );
+      if (!alreadyMarkedPrinted) {
+        await tryPrint(() async {
+          await KioskApi().printReceipt(widget.orderNumber);
+        }, 'backend-printReceipt-sync');
+      }
+    } else {
+      await tryPrint(() async {
+        await KioskApi().printReceipt(widget.orderNumber);
+      }, 'backend-printReceipt');
+    }
 
     if (!mounted) return;
     if (printed) {
       _autoReturnTimer?.cancel();
       _autoReturnCountdownTimer?.cancel();
-      _isNavigating = true;
-      _setScanStatus("Print command sent successfully.");
+      _orderStatePollTimer?.cancel();
+      _setScanStatus("Print is coming. Please collect your receipt.");
+      setState(() {
+        _printCompleted = true;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Print sent successfully.'),
+          content: Text('Print is coming. Please take your print.'),
           behavior: SnackBarBehavior.floating,
-          duration: Duration(seconds: 1),
+          duration: Duration(seconds: 2),
         ),
       );
-
-      await Future<void>.delayed(const Duration(milliseconds: 350));
       if (!mounted) return;
-
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => PaymentSuccessDialog(
-            cart: widget.cart,
-            orderNumber: widget.orderNumber,
-            language: "en",
-            restaurantName: widget.restaurantName,
-            orderType: widget.orderType,
-            autoPrint: false,
-            debugSource: "scan->print: pre-print success",
-          ),
-        ),
-      );
+      await _openPrintSuccessPage(debugSource: 'web_scan_to_print');
     } else {
       setState(() {
         _openingPrint = false;
+        _printCompleted = false;
         _printError = printError?.toString() ?? "Print failed";
       });
       _setScanStatus("Print failed. Tap Retry Print.");
@@ -2539,6 +2751,42 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
       );
       _focusScannerInput();
     }
+  }
+
+  Future<bool> _waitForPrintedMarker({
+    int retries = 2,
+    Duration delay = const Duration(milliseconds: 250),
+  }) async {
+    for (var i = 0; i < retries; i++) {
+      try {
+        final res = await KioskApi().getOrderDetails(widget.orderNumber);
+        if (_hasPrintedMarker(res.data, 7)) {
+          return true;
+        }
+      } catch (_) {
+        // ignore and retry once more
+      }
+      if (i < retries - 1) {
+        await Future<void>.delayed(delay);
+      }
+    }
+    return false;
+  }
+
+  Future<void> _openPrintSuccessPage({required String debugSource}) async {
+    if (!mounted || _isNavigating) return;
+    _isNavigating = true;
+    _orderStatePollTimer?.cancel();
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => _WebPrintReadyScreen(
+          orderNumber: widget.orderNumber,
+          restaurantName: widget.restaurantName,
+          source: debugSource,
+        ),
+      ),
+      (_) => false,
+    );
   }
 
   @override
@@ -2595,252 +2843,488 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                            Row(
-                              children: [
-                                Image.asset(
-                                  "assets/self.png",
-                                  height: compact ? 34 : 40,
-                                  fit: BoxFit.contain,
-                                ),
-                                const Spacer(),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 8,
+                              Row(
+                                children: [
+                                  Image.asset(
+                                    "assets/self.png",
+                                    height: compact ? 34 : 40,
+                                    fit: BoxFit.contain,
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFEEF7F0),
-                                    borderRadius: BorderRadius.circular(999),
-                                  ),
-                                  child: Text(
-                                    "Pickup #${widget.orderNumber}",
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                      color: Color(0xFF22643B),
+                                  const Spacer(),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFEEF7F0),
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    child: Text(
+                                      "Pickup #${widget.orderNumber}",
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                        color: Color(0xFF22643B),
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 20),
-                            Text(
-                              "Payment successful",
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: compact ? 28 : 34,
-                                fontWeight: FontWeight.w900,
-                                color: const Color(0xFF1D1D1D),
+                                ],
                               ),
-                            ),
-                            const SizedBox(height: 10),
-                            Text(
-                              "Show this QR at counter for printing.",
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: compact ? 13.5 : 15,
-                                height: 1.5,
-                                color: Colors.black54,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              "Auto return in ${_formatAutoReturn()}",
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                fontSize: 12.5,
-                                color: Colors.black45,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 22),
-                            if (widget.restaurantName != null &&
-                                widget.restaurantName!.trim().isNotEmpty)
+                              const SizedBox(height: 20),
                               Text(
-                                widget.restaurantName!,
+                                "Payment successful",
                                 textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFF9F342C),
-                                  letterSpacing: 0.4,
+                                style: TextStyle(
+                                  fontSize: compact ? 28 : 34,
+                                  fontWeight: FontWeight.w900,
+                                  color: const Color(0xFF1D1D1D),
                                 ),
                               ),
-                            if (widget.restaurantName != null &&
-                                widget.restaurantName!.trim().isNotEmpty)
-                              const SizedBox(height: 16),
-                            Center(
-                              child: Container(
-                                padding: const EdgeInsets.all(14),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFFFFBF7),
-                                  borderRadius: BorderRadius.circular(26),
-                                  border: Border.all(
-                                      color: const Color(0xFFEADCCD)),
-                                ),
-                                child: QrImageView(
-                                  data: _scanCode,
-                                  size: qrSize,
-                                  backgroundColor: Colors.white,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            SelectableText(
-                              _scanCode,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: compact ? 14 : 16,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 1.2,
-                                color: const Color(0xFF1D1D1D),
-                              ),
-                            ),
-                            const SizedBox(height: 18),
-                            _buildReceiptPreview(compact: compact),
-                            const SizedBox(height: 16),
-                            Text(
-                              _scanStatusText,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: compact ? 12.5 : 13.5,
-                                color: _scanStatusText.toLowerCase().contains(
-                                              "does not match",
-                                            ) ||
-                                        _scanStatusText
-                                            .toLowerCase()
-                                            .contains("failed")
-                                    ? Colors.red.shade700
-                                    : (_openingPrint ||
-                                            _scanStatusText
-                                                .toLowerCase()
-                                                .contains("matched") ||
-                                            _scanStatusText
-                                                .toLowerCase()
-                                                .contains("success"))
-                                        ? const Color(0xFF22643B)
-                                        : Colors.black54,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            if (_printError != null) ...[
                               const SizedBox(height: 10),
-                              Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFFFEBEE),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                    color: const Color(0xFFFFCDD2),
-                                  ),
-                                ),
-                                child: Text(
-                                  _printError!,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Color(0xFFB71C1C),
-                                    fontWeight: FontWeight.w700,
-                                  ),
+                              Text(
+                                "Show this QR at counter for printing.",
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: compact ? 13.5 : 15,
+                                  height: 1.5,
+                                  color: Colors.black54,
                                 ),
                               ),
-                            ],
-                            const SizedBox(height: 12),
-                            TextField(
-                              controller: _scanTextController,
-                              focusNode: _scanTextFocusNode,
-                              autofocus: true,
-                              autocorrect: false,
-                              enableSuggestions: false,
-                              keyboardType: TextInputType.text,
-                              textInputAction: TextInputAction.done,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 1.1,
-                              ),
-                              onChanged: _handleScannerTextChanged,
-                              onSubmitted: _handleScannerSubmitted,
-                              decoration: InputDecoration(
-                                hintText:
-                                    "Scanner input (auto-focus, no tap needed)",
-                                filled: true,
-                                fillColor: const Color(0xFFF7FAFC),
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                  vertical: 12,
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFFD8E0E8),
-                                  ),
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFFD8E0E8),
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFF22643B),
-                                    width: 2,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            if (_printError != null) ...[
-                              const SizedBox(height: 12),
-                              SizedBox(
-                                height: 48,
-                                child: ElevatedButton.icon(
-                                  onPressed: _openingPrint
-                                      ? null
-                                      : () => _openPrintScreen(fromRetry: true),
-                                  icon: _openingPrint
-                                      ? const SizedBox(
-                                          width: 16,
-                                          height: 16,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: Colors.white,
-                                          ),
-                                        )
-                                      : const Icon(Icons.print_rounded),
-                                  label: Text(
-                                    _openingPrint ? "Printing..." : "Retry Print",
-                                  ),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF9F342C),
-                                    foregroundColor: Colors.white,
-                                    elevation: 0,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(14),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                            const SizedBox(height: 10),
-                            if (_lastScan != null &&
-                                _lastScan!.trim().isNotEmpty) ...[
                               const SizedBox(height: 8),
                               Text(
-                                "Last scan: $_lastScan",
+                                "Auto return in ${_formatAutoReturn()}",
                                 textAlign: TextAlign.center,
                                 style: const TextStyle(
                                   fontSize: 12.5,
                                   color: Colors.black45,
+                                  fontWeight: FontWeight.w700,
                                 ),
                               ),
+                              const SizedBox(height: 22),
+                              if (widget.restaurantName != null &&
+                                  widget.restaurantName!.trim().isNotEmpty)
+                                Text(
+                                  widget.restaurantName!,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF9F342C),
+                                    letterSpacing: 0.4,
+                                  ),
+                                ),
+                              if (widget.restaurantName != null &&
+                                  widget.restaurantName!.trim().isNotEmpty)
+                                const SizedBox(height: 16),
+                              Center(
+                                child: Container(
+                                  padding: const EdgeInsets.all(14),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFFFFBF7),
+                                    borderRadius: BorderRadius.circular(26),
+                                    border: Border.all(
+                                        color: const Color(0xFFEADCCD)),
+                                  ),
+                                  child: QrImageView(
+                                    data: _scanCode,
+                                    size: qrSize,
+                                    backgroundColor: Colors.white,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              SelectableText(
+                                _scanCode,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: compact ? 14 : 16,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 1.2,
+                                  color: const Color(0xFF1D1D1D),
+                                ),
+                              ),
+                              const SizedBox(height: 18),
+                              _buildReceiptPreview(compact: compact),
+                              const SizedBox(height: 16),
+                              Text(
+                                _scanStatusText,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: compact ? 12.5 : 13.5,
+                                  color: _scanStatusText.toLowerCase().contains(
+                                                "does not match",
+                                              ) ||
+                                          _scanStatusText
+                                              .toLowerCase()
+                                              .contains("failed")
+                                      ? Colors.red.shade700
+                                      : (_openingPrint ||
+                                              _scanStatusText
+                                                  .toLowerCase()
+                                                  .contains("matched") ||
+                                              _scanStatusText
+                                                  .toLowerCase()
+                                                  .contains("success"))
+                                          ? const Color(0xFF22643B)
+                                          : Colors.black54,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (_printCompleted) ...[
+                                const SizedBox(height: 10),
+                                Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 12,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFE8F7EE),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: const Color(0xFFBEE3CC),
+                                    ),
+                                  ),
+                                  child: const Row(
+                                    children: [
+                                      Icon(
+                                        Icons.print_rounded,
+                                        color: Color(0xFF22643B),
+                                      ),
+                                      SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          "Print is coming. Please take your print.",
+                                          style: TextStyle(
+                                            color: Color(0xFF22643B),
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                              if (_printError != null) ...[
+                                const SizedBox(height: 10),
+                                Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFFFEBEE),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: const Color(0xFFFFCDD2),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    _printError!,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Color(0xFFB71C1C),
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              const SizedBox(height: 12),
+                              TextField(
+                                controller: _scanTextController,
+                                focusNode: _scanTextFocusNode,
+                                autofocus: true,
+                                autocorrect: false,
+                                enableSuggestions: false,
+                                keyboardType: TextInputType.text,
+                                textInputAction: TextInputAction.done,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.1,
+                                ),
+                                onChanged: _handleScannerTextChanged,
+                                onSubmitted: _handleScannerSubmitted,
+                                decoration: InputDecoration(
+                                  hintText:
+                                      "Scanner input (auto-focus, no tap needed)",
+                                  filled: true,
+                                  fillColor: const Color(0xFFF7FAFC),
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 12,
+                                  ),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                    borderSide: const BorderSide(
+                                      color: Color(0xFFD8E0E8),
+                                    ),
+                                  ),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                    borderSide: const BorderSide(
+                                      color: Color(0xFFD8E0E8),
+                                    ),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                    borderSide: const BorderSide(
+                                      color: Color(0xFF22643B),
+                                      width: 2,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              if (_printError != null) ...[
+                                const SizedBox(height: 12),
+                                SizedBox(
+                                  height: 48,
+                                  child: ElevatedButton.icon(
+                                    onPressed: _openingPrint
+                                        ? null
+                                        : () =>
+                                            _openPrintScreen(fromRetry: true),
+                                    icon: _openingPrint
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white,
+                                            ),
+                                          )
+                                        : const Icon(Icons.print_rounded),
+                                    label: Text(
+                                      _openingPrint
+                                          ? "Printing..."
+                                          : "Retry Print",
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF9F342C),
+                                      foregroundColor: Colors.white,
+                                      elevation: 0,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              const SizedBox(height: 10),
+                              if (_lastScan != null &&
+                                  _lastScan!.trim().isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  "Last scan: $_lastScan",
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    color: Colors.black45,
+                                  ),
+                                ),
+                              ],
                             ],
-                          ],
+                          ),
                         ),
                       ),
                     ),
                   ),
-                  ),
                 ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WebPrintReadyScreen extends StatefulWidget {
+  final int orderNumber;
+  final String? restaurantName;
+  final String source;
+
+  const _WebPrintReadyScreen({
+    required this.orderNumber,
+    this.restaurantName,
+    required this.source,
+  });
+
+  @override
+  State<_WebPrintReadyScreen> createState() => _WebPrintReadyScreenState();
+}
+
+class _WebPrintReadyScreenState extends State<_WebPrintReadyScreen>
+    with SingleTickerProviderStateMixin {
+  static const int _autoCloseSeconds = 8;
+  late final AnimationController _pulseController;
+  Timer? _autoCloseTimer;
+  Timer? _countdownTimer;
+  int _remaining = _autoCloseSeconds;
+  bool _navigating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 750),
+    )..repeat(reverse: true);
+    _autoCloseTimer = Timer(
+      const Duration(seconds: _autoCloseSeconds),
+      _goToHome,
+    );
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _navigating) return;
+      setState(() {
+        if (_remaining > 0) _remaining--;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _autoCloseTimer?.cancel();
+    _countdownTimer?.cancel();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  void _goToHome() {
+    if (!mounted || _navigating) return;
+    _navigating = true;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const UserIdScreen()),
+      (_) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.of(context).size.width < 720;
+    return Scaffold(
+      backgroundColor: const Color(0xFFF5EFE7),
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Container(
+                padding: EdgeInsets.all(compact ? 24 : 30),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(color: const Color(0xFFE8DCCF)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.08),
+                      blurRadius: 26,
+                      offset: const Offset(0, 16),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Image.asset(
+                      "assets/self.png",
+                      height: compact ? 34 : 40,
+                      fit: BoxFit.contain,
+                    ),
+                    const SizedBox(height: 20),
+                    ScaleTransition(
+                      scale: Tween<double>(begin: 0.92, end: 1.08).animate(
+                        CurvedAnimation(
+                          parent: _pulseController,
+                          curve: Curves.easeInOut,
+                        ),
+                      ),
+                      child: Container(
+                        width: compact ? 96 : 112,
+                        height: compact ? 96 : 112,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F7EE),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: const Icon(
+                          Icons.print_rounded,
+                          color: Color(0xFF22643B),
+                          size: 54,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 22),
+                    const Text(
+                      "Print Sent Successfully",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 30,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1D1D1D),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      "Please take your print.",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF22643B),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      "Order #${widget.orderNumber}",
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF6B5A4D),
+                      ),
+                    ),
+                    if (widget.restaurantName != null &&
+                        widget.restaurantName!.trim().isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        widget.restaurantName!.trim(),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF9F342C),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    Text(
+                      "Returning to start in ${_remaining}s",
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: Colors.black54,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: ElevatedButton(
+                        onPressed: _goToHome,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF9F342C),
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        child: const Text(
+                          "Done",
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

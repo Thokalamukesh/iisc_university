@@ -2,13 +2,19 @@ import 'dart:async';
 
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
-import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
+import 'package:api_selfxo_project/core/device_info.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/core/order_utils.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:api_selfxo_project/printer/epson_usb_printer_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
+import 'package:api_selfxo_project/screens/pin_screen.dart';
+import 'package:api_selfxo_project/services/auth_service.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -20,11 +26,21 @@ class RegisterKioskScreen extends StatefulWidget {
   State<RegisterKioskScreen> createState() => _RegisterKioskScreenState();
 }
 
+enum _ScanPaymentState {
+  paid,
+  unpaid,
+  unverifiedServerError,
+}
+
 class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   final PrinterService _printerService = PrinterService();
   final EpsonUSBPrinterService _usbService = EpsonUSBPrinterService();
+  final TextEditingController _restaurantIdCtrl = TextEditingController();
   final TextEditingController _kioskNameCtrl = TextEditingController();
   final TextEditingController _scannerCtrl = TextEditingController();
+  final FocusNode _restaurantIdFocusNode = FocusNode(
+    debugLabel: "setup-restaurant-id",
+  );
   final FocusNode _kioskNameFocusNode = FocusNode(
     debugLabel: "setup-kiosk-name",
   );
@@ -38,11 +54,11 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   bool _finishing = false;
   bool _active = true;
   bool _scannerWorking = false;
+  bool _showAdvancedScanner = false;
   bool _scannerPrintRunning = false;
   int _queuedScannerPrintJobs = 0;
 
   Timer? _scannerIdleTimer;
-  Timer? _scannerRefocusTimer;
   Timer? _globalScanIdleTimer;
   String _scannerStatus = "Scan any barcode/QR to test scanner.";
   String? _lastScannerValue;
@@ -60,6 +76,25 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   String? restaurantAddress;
   Map<String, dynamic>? _settingsData;
 
+  Future<void> _persistRestaurantContext({
+    required SharedPreferences prefs,
+    Map<String, dynamic>? settings,
+    Map<String, dynamic>? restaurant,
+  }) async {
+    final restaurantId = settings?["restaurant_id"] ??
+        settings?["restaurantId"] ??
+        restaurant?["restaurant_id"] ??
+        restaurant?["restaurantId"] ??
+        restaurant?["id"];
+    if (restaurantId != null && restaurantId.toString().trim().isNotEmpty) {
+      await prefs.setString("restaurant_id", restaurantId.toString().trim());
+    }
+    final name = restaurant?["name"]?.toString().trim();
+    if (name != null && name.isNotEmpty) {
+      await prefs.setString("restaurant_name", name);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -70,31 +105,23 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       if (_scannerPrintRunning) {
         return false;
       }
-      if (_kioskNameFocusNode.hasFocus || _scannerFocusNode.hasFocus) {
+      if (_isAnyTextInputFocused()) {
         return false;
       }
       return _captureGlobalScanKey(event);
     };
     HardwareKeyboard.instance.addHandler(_globalKeyHandler);
     _loadSettings();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _focusScannerField();
-    });
-    _scannerRefocusTimer = Timer.periodic(const Duration(milliseconds: 800), (
-      _,
-    ) {
-      if (!_active || !mounted) return;
-      _focusScannerField();
-    });
   }
 
   @override
   void dispose() {
     _active = false;
     _scannerIdleTimer?.cancel();
-    _scannerRefocusTimer?.cancel();
     _globalScanIdleTimer?.cancel();
     HardwareKeyboard.instance.removeHandler(_globalKeyHandler);
+    _restaurantIdCtrl.dispose();
+    _restaurantIdFocusNode.dispose();
     _kioskNameCtrl.dispose();
     _kioskNameFocusNode.dispose();
     _scannerCtrl.dispose();
@@ -108,12 +135,37 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final savedName = prefs.getString("kiosk_name");
+      final authToken = prefs.getString("auth_token")?.trim() ?? "";
+      final adminToken = prefs.getString("admin_token")?.trim() ?? "";
+      if (authToken.isEmpty && adminToken.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _settingsData = null;
+          restaurantName =
+              prefs.getString("restaurant_name")?.trim().isNotEmpty == true
+                  ? prefs.getString("restaurant_name")!.trim()
+                  : "Restaurant";
+          restaurantAddress = null;
+          _restaurantIdCtrl.text = prefs.getString("restaurant_id")?.trim() ?? "";
+          _kioskNameCtrl.text =
+              (savedName != null && savedName.trim().isNotEmpty)
+                  ? savedName.trim()
+                  : "";
+          isLoading = false;
+        });
+        return;
+      }
       final res = await AdminApi().getSettings();
       final data = res.data ?? {};
       final settings =
           (data["settings"] as Map?)?.cast<String, dynamic>() ?? {};
       final restaurant =
           (data["restaurant"] as Map?)?.cast<String, dynamic>() ?? {};
+      await _persistRestaurantContext(
+        prefs: prefs,
+        settings: settings,
+        restaurant: restaurant,
+      );
 
       await ReceiptPrintMode.storeFromMap(settings);
       await ReceiptPrintMode.storeFromMap(restaurant);
@@ -123,6 +175,16 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
         _settingsData = settings;
         restaurantName = restaurant["name"] ?? "Restaurant";
         restaurantAddress = restaurant["address"]?.toString();
+        final initialRestaurantId = (settings["restaurant_id"] ??
+                settings["restaurantId"] ??
+                restaurant["restaurant_id"] ??
+                restaurant["restaurantId"] ??
+                restaurant["id"] ??
+                prefs.getString("restaurant_id") ??
+                "")
+            .toString()
+            .trim();
+        _restaurantIdCtrl.text = initialRestaurantId;
         _kioskNameCtrl.text = (savedName != null && savedName.trim().isNotEmpty)
             ? savedName.trim()
             : "";
@@ -141,6 +203,11 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
         final kioskSettings =
             (raw["kiosk_settings"] as Map?)?.cast<String, dynamic>();
         final branch = (raw["branch"] as Map?)?.cast<String, dynamic>();
+        await _persistRestaurantContext(
+          prefs: prefs,
+          settings: kioskSettings,
+          restaurant: restaurant,
+        );
 
         await ReceiptPrintMode.storeFromMap(kioskSettings);
         await ReceiptPrintMode.storeFromMap(restaurant);
@@ -164,6 +231,16 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
               mergedSettings.isNotEmpty ? mergedSettings : kioskSettings;
           restaurantName = restaurant["name"] ?? "Restaurant";
           restaurantAddress = restaurant["address"]?.toString();
+          final initialRestaurantId = (mergedSettings["restaurant_id"] ??
+                  mergedSettings["restaurantId"] ??
+                  restaurant["restaurant_id"] ??
+                  restaurant["restaurantId"] ??
+                  restaurant["id"] ??
+                  prefs.getString("restaurant_id") ??
+                  "")
+              .toString()
+              .trim();
+          _restaurantIdCtrl.text = initialRestaurantId;
           _kioskNameCtrl.text =
               (savedName != null && savedName.trim().isNotEmpty)
                   ? savedName.trim()
@@ -175,6 +252,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
         setState(() {
           restaurantName = "Restaurant";
           restaurantAddress = null;
+          _restaurantIdCtrl.text = "";
           _kioskNameCtrl.text = "";
           isLoading = false;
         });
@@ -192,6 +270,25 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
 
     setState(() => _savingKioskName = true);
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final hasAuthToken = (prefs.getString("auth_token")?.trim() ?? "").isNotEmpty;
+      final hasAdminToken =
+          (prefs.getString("admin_token")?.trim() ?? "").isNotEmpty;
+      if (!hasAuthToken && !hasAdminToken) {
+        await prefs.setString("kiosk_name", name);
+        if (mounted) {
+          setState(() {
+            _settingsData ??= {};
+            _settingsData?["name"] = name;
+            _settingsData?["kiosk_name"] = name;
+            _settingsData?["device_name"] = name;
+          });
+        }
+        _showSnackBar("Saved locally.", const Color(0xFF1B8E3E));
+        OrderUtils.notifyInfoUpdated();
+        return;
+      }
+
       final body = <String, dynamic>{
         "name": name,
         "kiosk_name": name,
@@ -208,7 +305,6 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
         if (restaurantId != null) body["restaurant_id"] = restaurantId;
       }
       await AdminApi().updateSettings(body);
-      final prefs = await SharedPreferences.getInstance();
       await prefs.setString("kiosk_name", name);
       _showSnackBar("Device name updated", Colors.green);
       if (mounted) {
@@ -360,8 +456,21 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   Future<void> _finishSetup() async {
     if (_finishing) return;
     final name = _kioskNameCtrl.text.trim();
+    final enteredRestaurantId = _restaurantIdCtrl.text.trim();
+    kioskLog(
+      '_finishSetup start name="$name" restaurant_id="$enteredRestaurantId"',
+      tag: 'SETUP',
+    );
     if (name.isEmpty) {
       _showSnackBar("Enter device name", Colors.red);
+      return;
+    }
+    if (enteredRestaurantId.isEmpty) {
+      _showSnackBar("Enter restaurant ID", Colors.red);
+      return;
+    }
+    if (!RegExp(r'^\d+$').hasMatch(enteredRestaurantId)) {
+      _showSnackBar("Restaurant ID must be numeric", Colors.red);
       return;
     }
 
@@ -383,15 +492,192 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       }
 
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool("kiosk_setup_done", true);
-      if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      final previousRestaurantId =
+          prefs.getString("restaurant_id")?.trim() ?? "";
+      final normalizedRestaurantId = enteredRestaurantId;
+      final restaurantChanged = previousRestaurantId.isNotEmpty &&
+          previousRestaurantId != normalizedRestaurantId;
+      kioskLog(
+        'previous_restaurant_id="$previousRestaurantId" changed=$restaurantChanged',
+        tag: 'SETUP',
       );
+
+      if (restaurantChanged) {
+        await prefs.remove("auth_token");
+        await prefs.remove("admin_token");
+        await prefs.remove("device_uuid");
+        await prefs.remove("branch_id");
+      }
+
+      await prefs.setString("restaurant_id", normalizedRestaurantId);
+      _settingsData ??= {};
+      _settingsData?["restaurant_id"] = normalizedRestaurantId;
+
+      final restaurantExists =
+          await _validateRestaurantIdExists(normalizedRestaurantId, true);
+      kioskLog(
+        'restaurant validation for $normalizedRestaurantId => $restaurantExists',
+        tag: 'SETUP',
+      );
+      if (!restaurantExists) {
+        _showSnackBar("Invalid restaurant ID. Please check and try again.",
+            Colors.red.shade700);
+        return;
+      }
+
+      final resolvedDeviceId = await DeviceInfoUtil.getDeviceId(
+        restaurantId: normalizedRestaurantId,
+      );
+      await prefs.setString("device_uuid", resolvedDeviceId);
+      await prefs.setString("device_id", resolvedDeviceId);
+      kioskLog('resolved device_id=$resolvedDeviceId', tag: 'SETUP');
+
+      final existingKioskToken = prefs.getString("auth_token")?.trim() ?? "";
+      var initialized = false;
+      try {
+        initialized = await AuthService().initializeKiosk(
+          force: restaurantChanged || existingKioskToken.isEmpty,
+        );
+        kioskLog(
+          'initializeKiosk result=$initialized force=${restaurantChanged || existingKioskToken.isEmpty}',
+          tag: 'SETUP',
+        );
+      } catch (_) {
+        initialized = false;
+        kioskLog('initializeKiosk threw exception', tag: 'SETUP');
+      }
+      Object? bootstrapError;
+      if (!initialized) {
+        try {
+          await DeviceBootstrap.ensureDeviceReady();
+          kioskLog('DeviceBootstrap.ensureDeviceReady success', tag: 'SETUP');
+        } catch (e) {
+          bootstrapError = e;
+          kioskLogError(
+            'DeviceBootstrap.ensureDeviceReady failed: $e',
+            tag: 'SETUP',
+            error: e,
+          );
+        }
+      }
+
+      final refreshedKioskToken = prefs.getString("auth_token")?.trim() ?? "";
+      if (refreshedKioskToken.isEmpty) {
+        final authReason = AuthService.lastFailureReason ?? "";
+        final bootstrapReason = bootstrapError?.toString() ?? "";
+        final details = [
+          if (authReason.isNotEmpty) authReason,
+          if (bootstrapReason.isNotEmpty &&
+              !bootstrapReason.toLowerCase().contains(authReason.toLowerCase()))
+            bootstrapReason,
+        ].join(" | ");
+        kioskLog(
+          'kiosk token setup failed. authReason="$authReason" bootstrapReason="$bootstrapReason"',
+          tag: 'SETUP',
+        );
+
+        _showSnackBar(
+          details.isNotEmpty
+              ? "Kiosk token setup failed (server issue). Continue with PIN 9999 for admin mode. Details: $details"
+              : "Kiosk token setup failed (server issue). Continue with PIN 9999 for admin mode.",
+          Colors.orange.shade700,
+        );
+        kioskLog(
+          'continuing setup without kiosk token (temporary fallback mode)',
+          tag: 'SETUP',
+        );
+      }
+
+      await prefs.setBool("kiosk_setup_done", true);
+      await prefs.setBool("admin_local_bypass", false);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const PinScreen(),
+      );
+      if (!mounted) return;
+      final refreshedToken = prefs.getString("admin_token")?.trim() ?? "";
+      final localBypass = prefs.getBool("admin_local_bypass") ?? false;
+      if (refreshedToken.isNotEmpty || localBypass) {
+        kioskLog(
+          refreshedToken.isNotEmpty
+              ? 'admin token present -> opening admin home'
+              : 'local admin bypass active -> opening admin home',
+          tag: 'SETUP',
+        );
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
+        );
+      } else {
+        kioskLog('admin token missing after pin dialog', tag: 'SETUP');
+        _showSnackBar("PIN cancelled or invalid.", Colors.orange.shade700);
+      }
     } finally {
+      kioskLog('_finishSetup end', tag: 'SETUP');
       _finishing = false;
     }
+  }
+
+  Future<bool> _validateRestaurantIdExists(
+    String id,
+    bool persistMatch,
+  ) async {
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 12),
+        headers: const {"Accept": "application/json"},
+      ),
+    );
+    final endpoints = <String>[
+      WebApiConfig.allRestaurantsUrl,
+      "https://selfpos.sirixo.com/api/all-restaurants",
+      "https://gitam.sirixo.com/api/all-restaurants",
+    ];
+    for (final endpoint in endpoints) {
+      try {
+        kioskLog('validating restaurant id via $endpoint', tag: 'SETUP');
+        final res = await dio.get(endpoint);
+        final data = res.data;
+        final rawList = data is List
+            ? data
+            : (data is Map
+                ? (data["data"] ?? data["restaurants"] ?? data["items"])
+                : null);
+        if (rawList is! List) continue;
+        for (final item in rawList.whereType<Map>()) {
+          final itemId = item["id"]?.toString().trim() ?? "";
+          if (itemId != id) continue;
+          if (persistMatch) {
+            final prefs = await SharedPreferences.getInstance();
+            final selectedName = item["name"]?.toString().trim() ?? "";
+            if (selectedName.isNotEmpty) {
+              await prefs.setString("restaurant_name", selectedName);
+              if (mounted) {
+                setState(() {
+                  restaurantName = selectedName;
+                });
+              }
+            }
+            final selectedHash = item["hash"]?.toString().trim() ?? "";
+            if (selectedHash.isNotEmpty) {
+              await prefs.setString("restaurant_hash", selectedHash);
+            }
+          }
+          return true;
+        }
+      } catch (e, stackTrace) {
+        kioskLogError(
+          'restaurant validation endpoint failed: $endpoint -> $e',
+          tag: 'SETUP',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    return false;
   }
 
   String _normalizeScannerInput(String raw) {
@@ -500,18 +786,191 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     return false;
   }
 
+  String _norm(String? value) => (value ?? "").trim().toLowerCase();
+
+  Future<void> _resolveRestaurantIdFromPublicApi(
+      SharedPreferences prefs) async {
+    final existing = prefs.getString("restaurant_id")?.trim() ?? "";
+    final existingName = prefs.getString("restaurant_name")?.trim() ?? "";
+    final existingHash = prefs.getString("restaurant_hash")?.trim() ?? "";
+    if (existing.isNotEmpty && RegExp(r'^\d+$').hasMatch(existing)) return;
+
+    final targetNames = <String>{
+      _norm(restaurantName),
+      _norm(existingName),
+      _norm(_settingsData?["restaurant_name"]?.toString()),
+      _norm(_settingsData?["name"]?.toString()),
+    }..removeWhere((v) => v.isEmpty || v == "restaurant");
+    final targetIds = <String>{
+      existing.toLowerCase(),
+      existingHash.toLowerCase(),
+    }..removeWhere((v) => v.trim().isEmpty);
+
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 12),
+        headers: const {"Accept": "application/json"},
+      ),
+    );
+
+    final endpoints = <String>[
+      WebApiConfig.allRestaurantsUrl,
+      "https://gitam.sirixo.com/api/all-restaurants",
+      "https://selfpos.sirixo.com/api/all-restaurants",
+    ];
+
+    for (final endpoint in endpoints) {
+      try {
+        final res = await dio.get(endpoint);
+        final data = res.data;
+        final rawList = data is List
+            ? data
+            : (data is Map
+                ? (data["data"] ?? data["restaurants"] ?? data["items"])
+                : null);
+        if (rawList is! List || rawList.isEmpty) continue;
+
+        Map<String, dynamic>? selected;
+        for (final item in rawList.whereType<Map>()) {
+          final mapped = item.map((k, v) => MapEntry("$k", v));
+          final name = _norm(mapped["name"]?.toString());
+          final id = _norm(mapped["id"]?.toString());
+          final hash = _norm(mapped["hash"]?.toString());
+          if (targetIds.contains(id) || targetIds.contains(hash)) {
+            selected = mapped;
+            break;
+          }
+          if (targetNames.contains(name)) {
+            selected = mapped;
+            break;
+          }
+        }
+
+        if (selected == null && rawList.length == 1) {
+          final only = rawList.first;
+          if (only is Map) {
+            selected = only.map((k, v) => MapEntry("$k", v));
+          }
+        }
+
+        if (selected == null) continue;
+
+        final selectedId = selected["id"]?.toString().trim() ?? "";
+        if (selectedId.isEmpty) continue;
+
+        await prefs.setString("restaurant_id", selectedId);
+        final selectedName = selected["name"]?.toString().trim() ?? "";
+        if (selectedName.isNotEmpty) {
+          await prefs.setString("restaurant_name", selectedName);
+        }
+        final selectedHash = selected["hash"]?.toString().trim() ?? "";
+        if (selectedHash.isNotEmpty) {
+          await prefs.setString("restaurant_hash", selectedHash);
+        }
+        return;
+      } catch (_) {}
+    }
+  }
+
   Future<T> _withKioskTokenRecovery<T>(Future<T> Function() action) async {
     try {
       return await action();
     } catch (e) {
       final message = e.toString().toLowerCase();
-      final tokenMissing = message.contains("kiosk token missing") ||
+      final needsRecovery = message.contains("kiosk token missing") ||
           message.contains("auth_token") ||
+          message.contains("restaurant_not_configured") ||
+          message.contains("restaurant not configured") ||
           message.contains("unauthorized");
-      if (!tokenMissing) rethrow;
+      if (!needsRecovery) rethrow;
+      final prefs = await SharedPreferences.getInstance();
+      await _persistRestaurantContext(
+        prefs: prefs,
+        settings: _settingsData,
+        restaurant: <String, dynamic>{
+          "name": restaurantName,
+        },
+      );
+      await _resolveRestaurantIdFromPublicApi(prefs);
       await DeviceBootstrap.ensureDeviceReady();
       return action();
     }
+  }
+
+  bool _looksLikeServerErrorText(String message) {
+    final m = message.toLowerCase();
+    return m.contains("500") ||
+        m.contains("server error") ||
+        m.contains("internal server error");
+  }
+
+  Future<_ScanPaymentState> _resolveScanPaymentState(int orderId) async {
+    var hadServerFailure = false;
+
+    try {
+      final paymentRes = await _withKioskTokenRecovery(
+        () => KioskApi().checkPayment(orderId),
+      );
+      if (_containsPaidState(paymentRes.data, 5)) {
+        return _ScanPaymentState.paid;
+      }
+    } on DioException catch (e) {
+      final code = e.response?.statusCode ?? 0;
+      if (code >= 500) {
+        hadServerFailure = true;
+      } else {
+        rethrow;
+      }
+    } catch (e) {
+      if (_looksLikeServerErrorText(e.toString())) {
+        hadServerFailure = true;
+      } else {
+        rethrow;
+      }
+    }
+
+    try {
+      final detailsRes = await _withKioskTokenRecovery(
+        () => KioskApi().getOrderDetails(orderId),
+      );
+      if (_containsPaidState(detailsRes.data, 6)) {
+        return _ScanPaymentState.paid;
+      }
+      if (!hadServerFailure) {
+        return _ScanPaymentState.unpaid;
+      }
+    } on DioException catch (e) {
+      final code = e.response?.statusCode ?? 0;
+      if (code >= 500) {
+        hadServerFailure = true;
+      } else {
+        rethrow;
+      }
+    } catch (e) {
+      if (_looksLikeServerErrorText(e.toString())) {
+        hadServerFailure = true;
+      } else {
+        rethrow;
+      }
+    }
+
+    return hadServerFailure
+        ? _ScanPaymentState.unverifiedServerError
+        : _ScanPaymentState.unpaid;
+  }
+
+  String _friendlyDioError(Object e) {
+    if (e is DioException) {
+      final status = e.response?.statusCode;
+      final path = e.requestOptions.path;
+      final base = e.requestOptions.baseUrl;
+      if (status != null) {
+        return "HTTP $status ($base$path)";
+      }
+      return "$base$path: ${e.message ?? e.type.name}";
+    }
+    return e.toString();
   }
 
   Future<void> _runScannerTriggeredOrderPrint({
@@ -521,25 +980,26 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     if (!mounted || _scannerPrintRunning) return;
     setState(() {
       _scannerPrintRunning = true;
-      _scannerStatus = 'Payment QR "$scannedValue" detected. Checking payment...';
+      _scannerStatus =
+          'Payment QR "$scannedValue" detected. Checking payment...';
     });
     try {
-      final paymentRes = await _withKioskTokenRecovery(
-        () => KioskApi().checkPayment(orderId),
-      );
-      final isPaid = _containsPaidState(paymentRes.data, 5);
-      if (!isPaid) {
+      final paymentState = await _resolveScanPaymentState(orderId);
+      if (paymentState == _ScanPaymentState.unpaid) {
         if (!mounted) return;
         setState(() {
           _scannerStatus = "Order #$orderId is not paid yet.";
         });
-        _showSnackBar("Order #$orderId is not paid yet.", Colors.orange.shade800);
+        _showSnackBar(
+            "Order #$orderId is not paid yet.", Colors.orange.shade800);
         return;
       }
 
       if (!mounted) return;
       setState(() {
-        _scannerStatus = "Payment verified for order #$orderId. Printing...";
+        _scannerStatus = paymentState == _ScanPaymentState.unverifiedServerError
+            ? "Payment API temporary issue (500). Printing by scanned QR..."
+            : "Payment verified for order #$orderId. Printing...";
       });
 
       await _withKioskTokenRecovery(
@@ -554,13 +1014,15 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       setState(() {
         _scannerStatus = "Order #$orderId printed successfully.";
       });
-      _showSnackBar("Order #$orderId printed successfully.", Colors.green.shade700);
+      _showSnackBar(
+          "Order #$orderId printed successfully.", Colors.green.shade700);
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _scannerStatus = "Print failed for order #$orderId.";
       });
-      _showSnackBar("Print failed for order #$orderId: $e", Colors.red.shade700);
+      _showSnackBar("Print failed for order #$orderId: ${_friendlyDioError(e)}",
+          Colors.red.shade700);
     } finally {
       if (mounted) {
         setState(() {
@@ -667,6 +1129,18 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     return code < 32 || code == 127;
   }
 
+  bool _isAnyTextInputFocused() {
+    if (_restaurantIdFocusNode.hasFocus ||
+        _kioskNameFocusNode.hasFocus ||
+        _scannerFocusNode.hasFocus) {
+      return true;
+    }
+    final focusedContext = FocusManager.instance.primaryFocus?.context;
+    if (focusedContext == null) return false;
+    if (focusedContext.widget is EditableText) return true;
+    return focusedContext.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
   bool _captureGlobalScanKey(KeyDownEvent event) {
     if (event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter ||
@@ -712,7 +1186,9 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
   }
 
   void _focusScannerField() {
-    if (_kioskNameFocusNode.hasFocus) return;
+    if (_isAnyTextInputFocused()) {
+      return;
+    }
     if (!_scannerFocusNode.canRequestFocus) return;
     if (_scannerFocusNode.hasFocus) return;
     _scannerFocusNode.requestFocus();
@@ -727,23 +1203,19 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF9F342C),
         elevation: 0,
-
-        // 👈 Increase leading width so logo can grow
         leadingWidth: 90,
-
         leading: Padding(
           padding: const EdgeInsets.only(left: 12),
           child: Center(
             child: Image.asset(
               "assets/self.png",
-              height: 44, // 👈 visible, not cramped
+              height: 40,
               fit: BoxFit.contain,
             ),
           ),
         ),
-
         title: const Text(
-          "Initial Setup",
+          "Kiosk Setup",
           style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
       ),
@@ -752,16 +1224,54 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
           : ListView(
               padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
               children: [
-                _sectionTitle("Restaurant Info"),
                 _card(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      const Text(
+                        "Restaurant ID",
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _restaurantIdCtrl,
+                        focusNode: _restaurantIdFocusNode,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: false,
+                          signed: false,
+                        ),
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        textInputAction: TextInputAction.next,
+                        decoration: const InputDecoration(
+                          hintText: "Enter restaurant ID (e.g. 24)",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      const Row(
+                        children: [
+                          Icon(Icons.check_circle, color: Color(0xFF1B8E3E)),
+                          SizedBox(width: 8),
+                          Text(
+                            "Restaurant Selected",
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
                       Text(
                         restaurantName,
                         style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
                         ),
                       ),
                       if (restaurantAddress != null &&
@@ -778,14 +1288,34 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 24),
-                _sectionTitle("Device Setup"),
+                const SizedBox(height: 16),
                 _card(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        "Device Name",
+                        "Complete these 3 quick steps",
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _stepRow("1", "Enter device name and save"),
+                      const SizedBox(height: 6),
+                      _stepRow("2", "Setup USB printer and run test print"),
+                      const SizedBox(height: 6),
+                      _stepRow("3", "Scan test code to check scanner"),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                _card(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Step 1: Device Name",
                         style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w700,
@@ -795,9 +1325,9 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                       TextField(
                         controller: _kioskNameCtrl,
                         focusNode: _kioskNameFocusNode,
-                        textAlign: TextAlign.center,
+                        textAlign: TextAlign.left,
                         style: const TextStyle(
-                          fontSize: 22,
+                          fontSize: 18,
                           fontWeight: FontWeight.w600,
                         ),
                         decoration: const InputDecoration(
@@ -841,13 +1371,12 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                   ),
                 ),
                 const SizedBox(height: 24),
-                _sectionTitle("Scanner Setup"),
                 _card(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        "Test Scanner",
+                        "Step 2: Printer Setup",
                         style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w700,
@@ -855,81 +1384,7 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        "Tap the field below and scan a barcode/QR. If value appears, scanner is connected.\n"
-                        "For direct auto-print queue, scan dummy code: SELFX_TEST_PRINT\n"
-                        "Each dummy scan = one print.",
-                        style: TextStyle(color: Colors.grey.shade600),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _scannerCtrl,
-                        focusNode: _scannerFocusNode,
-                        onChanged: _handleScannerChanged,
-                        onSubmitted: _handleScannerSubmitted,
-                        textInputAction: TextInputAction.done,
-                        decoration: const InputDecoration(
-                          hintText: "Scan here",
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: _scannerWorking
-                              ? const Color(0xFFE7F6EB)
-                              : const Color(0xFFFFF5E7),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: _scannerWorking
-                                ? const Color(0xFF1B8E3E)
-                                : const Color(0xFFB8832E),
-                          ),
-                        ),
-                        child: Text(
-                          _scannerStatus,
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: _scannerWorking
-                                ? const Color(0xFF1B8E3E)
-                                : const Color(0xFF9A6A1D),
-                          ),
-                        ),
-                      ),
-                      if (_lastScannerValue != null &&
-                          _lastScannerValue!.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          "Last scanner value: $_lastScannerValue",
-                          style: TextStyle(
-                            color: Colors.grey.shade700,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 24),
-                _sectionTitle("Printer Setup"),
-                _card(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        "Configure + Test Printer",
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        "First select/connect USB printer, then run test print.",
+                        "Connect/select USB printer and run test print.",
                         style: TextStyle(color: Colors.grey.shade600),
                       ),
                       const SizedBox(height: 14),
@@ -970,6 +1425,129 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                     ],
                   ),
                 ),
+                const SizedBox(height: 24),
+                _card(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              "Step 3: Scanner Test",
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: () {
+                              if (!mounted) return;
+                              setState(() {
+                                _showAdvancedScanner = !_showAdvancedScanner;
+                              });
+                              if (_showAdvancedScanner) {
+                                _focusScannerField();
+                              }
+                            },
+                            icon: Icon(
+                              _showAdvancedScanner
+                                  ? Icons.expand_less_rounded
+                                  : Icons.tune_rounded,
+                              size: 18,
+                            ),
+                            label: Text(
+                              _showAdvancedScanner ? "Hide" : "Advanced",
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        "Background scanner listener is active.\n"
+                        "Scan-to-print after payment works even when this section is hidden.",
+                        style: TextStyle(color: Colors.grey.shade600),
+                      ),
+                      if (_showAdvancedScanner) ...[
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _scannerCtrl,
+                          focusNode: _scannerFocusNode,
+                          onChanged: _handleScannerChanged,
+                          onSubmitted: _handleScannerSubmitted,
+                          textInputAction: TextInputAction.done,
+                          decoration: const InputDecoration(
+                            hintText: "Scan here",
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _scannerWorking
+                                ? const Color(0xFFE7F6EB)
+                                : const Color(0xFFFFF5E7),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: _scannerWorking
+                                  ? const Color(0xFF1B8E3E)
+                                  : const Color(0xFFB8832E),
+                            ),
+                          ),
+                          child: Text(
+                            _scannerStatus,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: _scannerWorking
+                                  ? const Color(0xFF1B8E3E)
+                                  : const Color(0xFF9A6A1D),
+                            ),
+                          ),
+                        ),
+                        if (_lastScannerValue != null &&
+                            _lastScannerValue!.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            "Last scanner value: $_lastScannerValue",
+                            style: TextStyle(
+                              color: Colors.grey.shade700,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ] else ...[
+                        const SizedBox(height: 10),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF4F7FA),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFD8E0E8)),
+                          ),
+                          child: const Text(
+                            "Scanner tools hidden. Tap Advanced to open manual scan test and last scan details.",
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF516173),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 32),
                 SizedBox(
                   height: 54,
@@ -1005,17 +1583,39 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     );
   }
 
-  Widget _sectionTitle(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Text(
-        title,
-        style: TextStyle(
-          fontSize: 16,
-          fontWeight: FontWeight.w800,
-          color: Colors.grey.shade800,
+  Widget _stepRow(String step, String text) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 22,
+          height: 22,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: const Color(0xFF9F342C),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            step,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
         ),
-      ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              color: Colors.grey.shade800,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
     );
   }
 

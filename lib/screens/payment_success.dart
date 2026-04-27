@@ -7,11 +7,12 @@ import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
+import 'package:api_selfxo_project/screens/main_navigation.dart';
 
 enum PrinterStatus { printing, success, error }
 
@@ -58,54 +59,260 @@ class PaymentSuccessDialog extends StatefulWidget {
 
     String? resolvedTransactionId = transactionId;
     DateTime? resolvedOrderDate = orderDate;
-    var printItems = cart;
+    int? resolvedDisplayOrderNumber;
+    var printItems = _normalizeCartItemsForPrint(cart);
     String? resolvedPaymentMode = "PAID";
+    String? resolvedOrderType = orderType;
+    String? resolvedAddress;
     num? taxAmount;
     num? discountAmount;
-    if (resolvedTransactionId == null || resolvedOrderDate == null) {
+    num? resolvedSubTotalAmount;
+    num? resolvedTotalAmount;
+    num? resolvedParcelCharge;
+    var usedSyntheticItems = false;
+
+    try {
+      final res = await KioskApi().getOrderDetails(orderNumber);
+      final raw = res.data;
+      final backendItems = _extractOrderItemsFromPayload(raw);
+      if (backendItems.isNotEmpty) {
+        printItems = backendItems;
+      }
+      final backendRestaurantName = _findRestaurantNameInPayload(raw);
+      if (backendRestaurantName != null &&
+          backendRestaurantName.trim().isNotEmpty) {
+        resolvedRestaurantName = backendRestaurantName.trim();
+      }
+      resolvedAddress ??= _findAddressInPayload(raw);
+      resolvedTransactionId ??= _findTxnIdInPayload(raw);
+      resolvedOrderDate ??= _parseOrderDateFromPayload(raw);
+      resolvedDisplayOrderNumber ??= _findDisplayOrderNumberInPayload(raw);
+      resolvedPaymentMode = _findStringInPayload(raw, const [
+            "payment_mode",
+            "paymentMode",
+            "payment_method",
+            "paymentMethod",
+          ]) ??
+          resolvedPaymentMode;
+      taxAmount = _findNumInPayload(raw, const [
+        "tax",
+        "tax_amount",
+        "gst",
+        "total_tax",
+      ]);
+      discountAmount = _findNumInPayload(raw, const [
+        "discount",
+        "discount_amount",
+      ]);
+      resolvedSubTotalAmount = _findNumInPayload(raw, const [
+        "sub_total",
+        "subtotal",
+        "items_total",
+        "item_total",
+      ]);
+      resolvedTotalAmount = _findNumInPayload(raw, const [
+        "total",
+        "grand_total",
+        "total_amount",
+        "payable_amount",
+        "sub_total",
+      ]);
+      resolvedParcelCharge = _findNumInPayload(raw, const [
+        "take_away_charge",
+        "takeaway_charge",
+        "parcel_charge",
+        "parcelCharge",
+      ]);
+      resolvedOrderType ??= _findStringInPayload(raw, const [
+        "order_type",
+        "orderType",
+        "custom_order_type_name",
+        "order_type_name",
+      ]);
+    } catch (_) {}
+
+    // Fallback for gateways that return primary order payload in checkPayment.orderDetails.
+    if (printItems.isEmpty ||
+        resolvedOrderDate == null ||
+        resolvedOrderType == null ||
+        resolvedTotalAmount == null) {
       try {
-        final res = await KioskApi().getOrderDetails(orderNumber);
-        final raw = res.data;
-        final backendItems = _extractOrderItemsFromPayload(raw);
+        final paymentRes = await KioskApi().checkPayment(orderNumber);
+        final paymentRaw = paymentRes.data;
+        final detailsPayload = _extractOrderDetailsPayload(paymentRaw);
+        final backendItems = _extractOrderItemsFromPayload(detailsPayload);
         if (backendItems.isNotEmpty) {
           printItems = backendItems;
         }
-        resolvedTransactionId ??= _findTxnIdInPayload(raw);
-        resolvedOrderDate ??= _parseOrderDateFromPayload(raw);
-        resolvedPaymentMode = _findStringInPayload(raw, const [
+
+        final backendRestaurantName =
+            _findRestaurantNameInPayload(detailsPayload);
+        if (backendRestaurantName != null &&
+            backendRestaurantName.trim().isNotEmpty) {
+          resolvedRestaurantName = backendRestaurantName.trim();
+        }
+        resolvedAddress ??= _findAddressInPayload(detailsPayload);
+
+        resolvedTransactionId ??= _findTxnIdInPayload(detailsPayload);
+        resolvedOrderDate ??= _parseOrderDateFromPayload(detailsPayload);
+        resolvedDisplayOrderNumber ??=
+            _findDisplayOrderNumberInPayload(detailsPayload);
+        resolvedOrderType ??= _findStringInPayload(detailsPayload, const [
+          "order_type",
+          "orderType",
+          "custom_order_type_name",
+          "order_type_name",
+        ]);
+        resolvedPaymentMode = _findStringInPayload(detailsPayload, const [
               "payment_mode",
               "paymentMode",
               "payment_method",
               "paymentMethod",
             ]) ??
             resolvedPaymentMode;
-        taxAmount = _findNumInPayload(raw, const [
+        taxAmount ??= _findNumInPayload(detailsPayload, const [
           "tax",
           "tax_amount",
           "gst",
           "total_tax",
         ]);
-        discountAmount = _findNumInPayload(raw, const [
+        discountAmount ??= _findNumInPayload(detailsPayload, const [
           "discount",
           "discount_amount",
         ]);
+        resolvedSubTotalAmount ??= _findNumInPayload(detailsPayload, const [
+          "sub_total",
+          "subtotal",
+          "items_total",
+          "item_total",
+        ]);
+        resolvedTotalAmount ??= _findNumInPayload(detailsPayload, const [
+          "total",
+          "grand_total",
+          "total_amount",
+          "payable_amount",
+          "sub_total",
+        ]);
+        resolvedParcelCharge ??= _findNumInPayload(detailsPayload, const [
+          "take_away_charge",
+          "takeaway_charge",
+          "parcel_charge",
+          "parcelCharge",
+        ]);
       } catch (_) {}
     }
+
+    if (resolvedRestaurantName == null ||
+        resolvedRestaurantName.trim().isEmpty) {
+      resolvedRestaurantName = prefs.getString("restaurant_name");
+    }
+    resolvedRestaurantName ??= "OUR KITCHEN";
+
+    if (printItems.isEmpty &&
+        resolvedTotalAmount != null &&
+        resolvedTotalAmount > 0) {
+      // Keep total accurate even when backend omits expanded line-items.
+      usedSyntheticItems = true;
+      final syntheticBaseAmount =
+          (resolvedSubTotalAmount != null && resolvedSubTotalAmount > 0)
+              ? resolvedSubTotalAmount
+              : resolvedTotalAmount;
+      printItems = [
+        {
+          "qty": 1,
+          "price": syntheticBaseAmount,
+          "amount": syntheticBaseAmount,
+          "name": "Order Amount",
+          "category": "Items",
+        },
+      ];
+    }
+
+    if ((resolvedTotalAmount == null || resolvedTotalAmount <= 0) &&
+        printItems.isNotEmpty) {
+      final derivedTotal = printItems.fold<num>(0, (sum, item) {
+        final lineAmount = _asNum(item["amount"] ?? item["total"]);
+        if (lineAmount > 0) return sum + lineAmount;
+        final qty = _asNum(item["qty"] ?? item["quantity"] ?? item["count"]);
+        final safeQty = qty <= 0 ? 1 : qty;
+        final price =
+            _asNum(item["price"] ?? item["rate"] ?? item["unit_price"]);
+        return sum + (safeQty * price);
+      });
+      if (derivedTotal > 0) {
+        resolvedTotalAmount = derivedTotal;
+      }
+    }
+
+    final hasResolvedTotal =
+        resolvedTotalAmount != null && resolvedTotalAmount >= 0;
+    final shouldForceLocal = printItems.isNotEmpty || hasResolvedTotal;
+    if (!shouldForceLocal) {
+      // When order details API payload is incomplete, fallback to backend print
+      // so receipt still includes restaurant/items from server side.
+      resolvedRestaurantName =
+          prefs.getString("restaurant_name") ?? resolvedRestaurantName;
+    }
+    final shouldApplyParcelOverride = (resolvedParcelCharge != null &&
+            resolvedParcelCharge > 0) &&
+        !(usedSyntheticItems &&
+            (resolvedSubTotalAmount == null || resolvedSubTotalAmount <= 0));
 
     await PrinterService().printOrder(
       orderId: orderNumber,
       cartItems: printItems,
       restaurantName: resolvedRestaurantName,
+      address: resolvedAddress,
       taxId: taxId,
       paymentMode: resolvedPaymentMode,
       transactionId: resolvedTransactionId,
       orderDate: resolvedOrderDate,
       taxAmount: taxAmount,
       discountAmount: discountAmount,
-      orderType: orderType,
-      forceLocal: true,
+      orderType: resolvedOrderType,
+      displayOrderNumber: resolvedDisplayOrderNumber,
+      forceLocal: shouldForceLocal,
+      totalAmountOverride: hasResolvedTotal ? resolvedTotalAmount : null,
       removeTaxLines: true,
+      parcelTotalOverride:
+          shouldApplyParcelOverride ? resolvedParcelCharge : null,
     );
+  }
+
+  static dynamic _extractOrderDetailsPayload(dynamic raw) {
+    if (raw is Map) {
+      final orderDetails = raw["orderDetails"] ?? raw["order_details"];
+      if (orderDetails is Map) return orderDetails;
+    }
+    return raw;
+  }
+
+  static List<Map<String, dynamic>> _normalizeCartItemsForPrint(
+    List<Map<String, dynamic>> cart,
+  ) {
+    if (cart.isEmpty) return const [];
+    return cart.map((item) {
+      final qtyNum = _asNum(item["qty"] ?? item["quantity"] ?? item["count"]);
+      final qty = qtyNum <= 0 ? 1 : qtyNum;
+      final price = _asNum(item["price"] ?? item["rate"] ?? item["unit_price"]);
+      final amount = _asNum(item["amount"] ?? item["total"]);
+      final name = _firstNonEmpty(
+        [item["name"], item["item_name"], item["title"]],
+        fallback: "Item",
+      );
+      final category = _firstNonEmpty(
+        [item["category"], item["category_name"]],
+        fallback: "Items",
+      );
+      return {
+        "qty": qty,
+        "price": price,
+        "amount": amount > 0 ? amount : price * qty,
+        "name": name,
+        "category": category,
+        "image": item["image"]?.toString(),
+      };
+    }).toList();
   }
 
   static List<Map<String, dynamic>> _extractOrderItemsFromPayload(
@@ -113,6 +320,12 @@ class PaymentSuccessDialog extends StatefulWidget {
   ) {
     List<dynamic> raw = [];
     if (data is Map) {
+      final orderDetails = data["orderDetails"] is Map
+          ? data["orderDetails"] as Map
+          : (data["order_details"] is Map
+              ? data["order_details"] as Map
+              : null);
+      final orderDetailsOrder = orderDetails?["order"];
       final candidates = [
         data["order_items"],
         data["items"],
@@ -121,9 +334,21 @@ class PaymentSuccessDialog extends StatefulWidget {
         data["orderItemList"],
         data["orderDetails"],
         data["order_details"],
+        orderDetails?["order_items"],
+        orderDetails?["items"],
+        orderDetails?["orderItems"],
+        orderDetails?["order_item_list"],
+        orderDetails?["orderItemList"],
+        orderDetailsOrder is Map ? orderDetailsOrder["order_items"] : null,
         data["order"] is Map ? data["order"]["order_items"] : null,
         data["data"] is Map ? data["data"]["order_items"] : null,
         data["data"] is Map ? data["data"]["items"] : null,
+        data["data"] is Map && data["data"]["orderDetails"] is Map
+            ? data["data"]["orderDetails"]["order_items"]
+            : null,
+        data["data"] is Map && data["data"]["order_details"] is Map
+            ? data["data"]["order_details"]["order_items"]
+            : null,
         data["data"] is Map && data["data"]["order"] is Map
             ? data["data"]["order"]["order_items"]
             : null,
@@ -298,6 +523,102 @@ class PaymentSuccessDialog extends StatefulWidget {
     return null;
   }
 
+  static String? _findRestaurantNameInPayload(dynamic value) {
+    if (value is Map) {
+      for (final key in const ["restaurant_name", "restaurantName"]) {
+        final v = value[key];
+        if (v != null && v.toString().trim().isNotEmpty) {
+          return v.toString().trim();
+        }
+      }
+
+      final restaurantNode = value["restaurant"];
+      if (restaurantNode is Map) {
+        final name = restaurantNode["name"]?.toString().trim();
+        if (name != null && name.isNotEmpty) return name;
+      }
+      final branchNode = value["branch"];
+      if (branchNode is Map) {
+        final name = branchNode["name"]?.toString().trim();
+        if (name != null && name.isNotEmpty) return name;
+      }
+      final orderNode = value["order"];
+      if (orderNode is Map) {
+        final orderBranch = orderNode["branch"];
+        if (orderBranch is Map) {
+          final name = orderBranch["name"]?.toString().trim();
+          if (name != null && name.isNotEmpty) return name;
+        }
+      }
+
+      for (final entry in value.entries) {
+        final found = _findRestaurantNameInPayload(entry.value);
+        if (found != null) return found;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        final found = _findRestaurantNameInPayload(item);
+        if (found != null) return found;
+      }
+    }
+    return null;
+  }
+
+  static int? _findDisplayOrderNumberInPayload(dynamic value) {
+    final direct = _findIntInPayload(value, const [
+      "order_number",
+      "display_order_number",
+      "displayOrderNumber",
+    ]);
+    if (direct != null && direct > 0) return direct;
+
+    final formatted = _findStringInPayload(value, const [
+      "show_formatted_order_number",
+      "formatted_order_number",
+      "showFormattedOrderNumber",
+      "formattedOrderNumber",
+    ]);
+    if (formatted != null && formatted.trim().isNotEmpty) {
+      final match = RegExp(r'(\d{1,12})').firstMatch(formatted);
+      final parsed = int.tryParse(match?.group(1) ?? "");
+      if (parsed != null && parsed > 0) return parsed;
+    }
+    return null;
+  }
+
+  static String? _findAddressInPayload(dynamic value) {
+    if (value is Map) {
+      final branchNode = value["branch"];
+      if (branchNode is Map) {
+        final address = branchNode["address"]?.toString().trim();
+        if (address != null && address.isNotEmpty) return address;
+      }
+      final orderNode = value["order"];
+      if (orderNode is Map) {
+        final orderBranch = orderNode["branch"];
+        if (orderBranch is Map) {
+          final address = orderBranch["address"]?.toString().trim();
+          if (address != null && address.isNotEmpty) return address;
+        }
+      }
+      final restaurantNode = value["restaurant"];
+      if (restaurantNode is Map) {
+        final address = restaurantNode["address"]?.toString().trim();
+        if (address != null && address.isNotEmpty) return address;
+      }
+      for (final entry in value.entries) {
+        final found = _findAddressInPayload(entry.value);
+        if (found != null) return found;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        final found = _findAddressInPayload(item);
+        if (found != null) return found;
+      }
+    }
+    return null;
+  }
+
   static num? _findNumInPayload(dynamic value, List<String> keys) {
     if (value is Map) {
       for (final k in keys) {
@@ -313,6 +634,27 @@ class PaymentSuccessDialog extends StatefulWidget {
     } else if (value is List) {
       for (final item in value) {
         final found = _findNumInPayload(item, keys);
+        if (found != null) return found;
+      }
+    }
+    return null;
+  }
+
+  static int? _findIntInPayload(dynamic value, List<String> keys) {
+    if (value is Map) {
+      for (final key in keys) {
+        final dynamic v = value[key];
+        if (v is int && v > 0) return v;
+        final parsed = int.tryParse(v?.toString() ?? "");
+        if (parsed != null && parsed > 0) return parsed;
+      }
+      for (final entry in value.entries) {
+        final found = _findIntInPayload(entry.value, keys);
+        if (found != null) return found;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        final found = _findIntInPayload(item, keys);
         if (found != null) return found;
       }
     }
@@ -338,6 +680,7 @@ class PaymentSuccessDialog extends StatefulWidget {
   static DateTime? _parseOrderDateFromPayload(dynamic value) {
     final keys = [
       "created_at",
+      "date_time",
       "order_date",
       "date",
       "createdAt",
@@ -629,8 +972,15 @@ class _PaymentSuccessDialogState extends State<PaymentSuccessDialog>
 
   void _navigateToWelcome() {
     _scheduleImageCacheClear();
+    final String safeOrderType = (widget.orderType?.trim().isNotEmpty ?? false)
+        ? widget.orderType!
+        : "dine_in";
     Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(
+        builder: (_) => kIsWeb
+            ? MainNavigation(orderType: safeOrderType)
+            : const AdminHomeScreen(),
+      ),
       (_) => false,
     );
   }

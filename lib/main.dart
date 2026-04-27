@@ -1,16 +1,18 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
+import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:api_selfxo_project/screens/register_screen.dart';
 import 'package:api_selfxo_project/screens/web_qr_menu_entry.dart';
-import 'package:api_selfxo_project/background_image/background_image.dart';
+import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
 import 'package:api_selfxo_project/core/kiosk_background_service.dart';
@@ -29,7 +31,8 @@ final GlobalKey<ScaffoldMessengerState> rootScaffoldMessengerKey =
 final AppRouteObserver appRouteObserver = AppRouteObserver();
 
 class AppRouteObserver extends NavigatorObserver {
-  final ValueNotifier<String> currentRouteHint = ValueNotifier<String>('unknown');
+  final ValueNotifier<String> currentRouteHint =
+      ValueNotifier<String>('unknown');
 
   void _updateCurrent(Route<dynamic>? route) {
     if (route == null) {
@@ -99,9 +102,7 @@ Future<void> main() async {
 
     final Widget initialHome = kIsWeb
         ? _resolveInitialWebHome()
-        : (restaurantId == null || restaurantId.trim().isEmpty)
-            ? const RegisterKioskScreen()
-            : (setupDone ? const WelcomeScreen() : const RegisterKioskScreen());
+        : (setupDone ? const AdminHomeScreen() : const RegisterKioskScreen());
 
     runApp(
       ChangeNotifierProvider(
@@ -168,6 +169,12 @@ class MyApp extends StatefulWidget {
   State<MyApp> createState() => _MyAppState();
 }
 
+enum _GlobalScanPaymentState {
+  paid,
+  unpaid,
+  unverifiedServerError,
+}
+
 class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   Timer? _idleTimer;
   late final VoidCallback _idleListener;
@@ -179,9 +186,12 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   final FocusNode _appFocusNode = FocusNode(debugLabel: 'app-root');
   final StringBuffer _globalScanBuffer = StringBuffer();
   Timer? _globalScanIdleTimer;
+  late final KeyEventCallback _globalHardwareKeyHandler;
   bool _globalScanBusy = false;
   String _lastGlobalScan = '';
   DateTime _lastGlobalScanAt = DateTime.fromMillisecondsSinceEpoch(0);
+  final List<_GlobalScanTask> _globalScanQueue = <_GlobalScanTask>[];
+  final Set<int> _globalQueuedOrderIds = <int>{};
 
   static const bool _enableHeartbeatLogs = false;
 
@@ -209,6 +219,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       onJankDetected: (_) {},
     );
     _watchdog.start();
+    _globalHardwareKeyHandler = _handleGlobalHardwareKeyEvent;
+    HardwareKeyboard.instance.addHandler(_globalHardwareKeyHandler);
 
     KioskMemoryService.instance.start(
       cacheClearInterval: KioskConfig.memoryCacheClearInterval,
@@ -242,7 +254,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     final nav = rootNavigatorKey.currentState;
     if (nav == null) return;
     nav.pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(builder: (_) => _buildRootFallbackHome()),
       (_) => false,
     );
   }
@@ -255,6 +267,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     _heartbeatTimer?.cancel();
     _serviceHeartbeatTimer?.cancel();
     _globalScanIdleTimer?.cancel();
+    HardwareKeyboard.instance.removeHandler(_globalHardwareKeyHandler);
     _watchdog.stop();
     KioskMemoryService.instance.stop();
     WidgetsBinding.instance.removeObserver(this);
@@ -281,9 +294,6 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               KioskMemoryService.instance.reportUserActivity();
               if (_isRemoteBackKey(event)) {
                 unawaited(_handleSystemBackPress());
-                return KeyEventResult.handled;
-              }
-              if (_handleGlobalPaymentScanKey(event)) {
                 return KeyEventResult.handled;
               }
               return KeyEventResult.ignored;
@@ -469,16 +479,67 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     _idleTimer = Timer(_idleTimeout, _handleIdleTimeout);
   }
 
-  void _handleIdleTimeout() {
+  void _handleIdleTimeout() async {
     if (!IdleTimer.enabled.value) return;
+    if (await _shouldSkipIdleRedirectBySetupState()) {
+      _resetIdleTimer();
+      return;
+    }
+    if (_isIdleRedirectBlockedForCurrentRoute()) {
+      _resetIdleTimer();
+      return;
+    }
     final nav = rootNavigatorKey.currentState;
     if (nav == null) return;
     _scheduleImageCacheClear();
     nav.pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+      MaterialPageRoute(builder: (_) => _buildRootFallbackHome()),
       (_) => false,
     );
     _resetIdleTimer();
+  }
+
+  Widget _buildRootFallbackHome() {
+    if (kIsWeb) {
+      return _resolveInitialWebHome();
+    }
+    return const AdminHomeScreen();
+  }
+
+  Future<bool> _shouldSkipIdleRedirectBySetupState() async {
+    if (kIsWeb) return false;
+    final prefs = await SharedPreferences.getInstance();
+    final setupDone = prefs.getBool('kiosk_setup_done') ?? false;
+    final restaurantId = prefs.getString('restaurant_id')?.trim() ?? '';
+    if (!setupDone || restaurantId.isEmpty) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isIdleRedirectBlockedForCurrentRoute() {
+    final routeHint = appRouteObserver.currentRouteHint.value.toLowerCase();
+    if (routeHint.trim().isEmpty || routeHint == 'unknown') {
+      return false;
+    }
+    const blockedHints = <String>[
+      'registerkioskscreen',
+      'register_screen',
+      'registerscreen',
+      'userid',
+      'userscreen',
+      'appinit',
+      'setup',
+      'paymentscreen',
+      'payment_screen',
+      'pickupqrscreen',
+      'pickup_qr',
+      'pickup',
+    ];
+    for (final blocked in blockedHints) {
+      if (routeHint.contains(blocked)) return true;
+    }
+    return false;
   }
 
   void _startServiceHeartbeat() {
@@ -540,11 +601,49 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         key == LogicalKeyboardKey.browserBack;
   }
 
+  bool _handleGlobalHardwareKeyEvent(KeyEvent event) {
+    if (kIsWeb) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return false;
+    }
+
+    _resetIdleTimer();
+    _watchdog.reportUserActivity();
+    KioskMemoryService.instance.reportUserActivity();
+
+    if (_isRemoteBackKey(event)) {
+      unawaited(_handleSystemBackPress());
+      return true;
+    }
+
+    if (_shouldSuppressGlobalScanForCurrentRoute()) {
+      return false;
+    }
+
+    _handleGlobalPaymentScanKey(event);
+    return false;
+  }
+
+  bool _shouldSuppressGlobalScanForCurrentRoute() {
+    final routeHint = appRouteObserver.currentRouteHint.value.toLowerCase();
+    if (routeHint.trim().isEmpty || routeHint == 'unknown') return false;
+    const blockedHints = <String>[
+      'pickupqrscreen',
+      'pickup_qr',
+      'webscantoprint',
+      'scan_to_print',
+      'payment_screen_web',
+      'paymentscreenweb',
+    ];
+    for (final blocked in blockedHints) {
+      if (routeHint.contains(blocked)) return true;
+    }
+    return false;
+  }
+
   bool _handleGlobalPaymentScanKey(KeyEvent event) {
-    if (kIsWeb || event is! KeyDownEvent) return false;
-    if (_globalScanBusy) return false;
-    if (!_isGlobalScannerEnabledForCurrentRoute()) return false;
-    if (_isAnyTextInputFocused()) return false;
+    if (kIsWeb) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
 
     if (event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter ||
@@ -561,7 +660,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           ..write(cur.substring(0, cur.length - 1));
       }
       _scheduleGlobalScanIdleFlush();
-      return _globalScanBuffer.isNotEmpty;
+      return true;
     }
 
     final character = event.character;
@@ -607,13 +706,59 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     _lastGlobalScan = value;
     _lastGlobalScanAt = now;
 
-    unawaited(
-      _processGlobalPaymentScan(
-        orderId: orderId,
-        source: trigger,
-        rawValue: value,
-      ),
+    _enqueueGlobalPaymentScan(
+      orderId: orderId,
+      source: trigger,
+      rawValue: value,
     );
+  }
+
+  void _enqueueGlobalPaymentScan({
+    required int orderId,
+    required String source,
+    required String rawValue,
+  }) {
+    if (_globalQueuedOrderIds.contains(orderId)) {
+      _showGlobalScanSnack(
+        'Order #$orderId already in print queue.',
+        background: Colors.blueGrey.shade700,
+        duration: const Duration(milliseconds: 900),
+      );
+      return;
+    }
+
+    _globalQueuedOrderIds.add(orderId);
+    _globalScanQueue.add(
+      _GlobalScanTask(orderId: orderId, source: source, rawValue: rawValue),
+    );
+
+    if (_globalScanQueue.length > 1 || _globalScanBusy) {
+      _showGlobalScanSnack(
+        'Order #$orderId added to queue.',
+        background: Colors.blueGrey.shade700,
+        duration: const Duration(milliseconds: 900),
+      );
+    }
+
+    unawaited(_drainGlobalScanQueue());
+  }
+
+  Future<void> _drainGlobalScanQueue() async {
+    if (_globalScanBusy) return;
+    _globalScanBusy = true;
+    try {
+      while (_globalScanQueue.isNotEmpty) {
+        final task = _globalScanQueue.removeAt(0);
+        _globalQueuedOrderIds.remove(task.orderId);
+        await _processGlobalPaymentScan(
+          orderId: task.orderId,
+          source: task.source,
+          rawValue: task.rawValue,
+        );
+      }
+    } finally {
+      _globalScanBusy = false;
+    }
   }
 
   String _sanitizeScan(String raw) {
@@ -633,58 +778,24 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     return id;
   }
 
-  bool _isAnyTextInputFocused() {
-    final focus = FocusManager.instance.primaryFocus;
-    final ctx = focus?.context;
-    if (ctx == null) return false;
-    if (ctx.widget is EditableText) return true;
-    return ctx.findAncestorWidgetOfExactType<EditableText>() != null;
-  }
-
-  bool _isGlobalScannerEnabledForCurrentRoute() {
-    final routeHint = appRouteObserver.currentRouteHint.value.toLowerCase();
-    if (routeHint.trim().isEmpty || routeHint == 'unknown') {
-      return true;
-    }
-
-    const blockedHints = <String>[
-      'registerkioskscreen',
-      'register_screen',
-      'registerscreen',
-      'userid',
-      'userscreen',
-      'pinscreen',
-      'admin',
-      'dashboard',
-      'settings',
-      'payment_screen',
-      'paymentscreendialog',
-      'pickupqrscreen',
-      'splashscreen',
-    ];
-
-    for (final blocked in blockedHints) {
-      if (routeHint.contains(blocked)) return false;
-    }
-    return true;
-  }
-
   Future<void> _processGlobalPaymentScan({
     required int orderId,
     required String source,
     required String rawValue,
   }) async {
-    if (_globalScanBusy) return;
-    _globalScanBusy = true;
     _showGlobalScanSnack(
       'Checking payment for order #$orderId...',
       background: Colors.blueGrey.shade700,
       duration: const Duration(milliseconds: 900),
     );
     try {
-      final paymentRes = await KioskApi().checkPayment(orderId);
-      final isPaid = _containsPaidState(paymentRes.data, 5);
-      if (!isPaid) {
+      final paymentState = await _resolveGlobalScanPaymentState(
+        orderId,
+      ).timeout(
+        const Duration(milliseconds: 1200),
+        onTimeout: () => _GlobalScanPaymentState.unverifiedServerError,
+      );
+      if (paymentState == _GlobalScanPaymentState.unpaid) {
         _showGlobalScanSnack(
           'Order #$orderId is not paid yet.',
           background: Colors.orange.shade800,
@@ -692,9 +803,22 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         return;
       }
 
-      await PaymentSuccessDialog.printReceiptUsingTabletFlow(
-        cart: const [],
-        orderNumber: orderId,
+      if (paymentState == _GlobalScanPaymentState.unverifiedServerError) {
+        _showGlobalScanSnack(
+          'Payment API issue (500). Printing by scanned QR...',
+          background: Colors.orange.shade700,
+          duration: const Duration(milliseconds: 1200),
+        );
+      }
+
+      if (!mounted) return;
+      unawaited(_showScanAcceptedPopup(orderId));
+
+      await _withGlobalKioskRecovery(
+        () => PaymentSuccessDialog.printReceiptUsingTabletFlow(
+          cart: const [],
+          orderNumber: orderId,
+        ),
       );
 
       _showGlobalScanSnack(
@@ -703,13 +827,317 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       );
     } catch (e) {
       _showGlobalScanSnack(
-        'Print failed for order #$orderId ($source): $e',
+        'Print failed for order #$orderId ($source): ${_friendlyDioError(e)}',
         background: Colors.red.shade700,
         duration: const Duration(seconds: 2),
       );
-    } finally {
-      _globalScanBusy = false;
     }
+  }
+
+  Future<void> _showScanAcceptedPopup(int orderId) async {
+    final popupContext = rootNavigatorKey.currentContext;
+    if (popupContext == null) return;
+    PosPaymentSuccessData data = _buildFallbackScanPopupData(orderId);
+    try {
+      data = await _buildScanPopupData(orderId).timeout(
+        const Duration(milliseconds: 900),
+        onTimeout: () => _buildFallbackScanPopupData(orderId),
+      );
+    } catch (_) {}
+    if (!mounted) return;
+    final activeContext = rootNavigatorKey.currentContext;
+    if (activeContext == null) return;
+    // ignore: use_build_context_synchronously
+    unawaited(
+      showPosPaymentSuccessDialog(
+        activeContext,
+        autoClose: const Duration(seconds: 2),
+        data: data,
+      ),
+    );
+  }
+
+  PosPaymentSuccessData _buildFallbackScanPopupData(int orderId) {
+    return PosPaymentSuccessData(
+      orderId: orderId.toString(),
+      amountPaid: '-',
+      amountLabel: 'Bill Amount',
+      paymentMethod: 'QR Scan',
+      dateTimeText: DateTime.now()
+          .toLocal()
+          .toIso8601String()
+          .replaceFirst('T', ' ')
+          .split('.')
+          .first,
+      orderedItems: const [],
+      title: 'Payment Received',
+      subtitle: 'Receipt Printing',
+    );
+  }
+
+  Future<PosPaymentSuccessData> _buildScanPopupData(int orderId) async {
+    dynamic payload;
+    try {
+      final orderRes = await _withGlobalKioskRecovery(
+        () => KioskApi().getOrderDetails(orderId),
+      );
+      payload = orderRes.data;
+    } catch (_) {
+      return _buildFallbackScanPopupData(orderId);
+    }
+
+    final orderedItems = _extractPopupOrderedItems(payload);
+    final amountValue = _findNumByKeys(payload, const [
+      'total',
+      'grand_total',
+      'total_amount',
+      'amount',
+      'paid_amount',
+      'payable_amount',
+      'final_total',
+    ]);
+    final amountText = amountValue == null
+        ? '-'
+        : (amountValue % 1 == 0
+            ? 'Rs ${amountValue.toStringAsFixed(0)}'
+            : 'Rs ${amountValue.toStringAsFixed(2)}');
+    final paymentMethod = _findTextByKeys(payload, const [
+          'payment_mode',
+          'paymentMethod',
+          'payment_method',
+          'paymentMode',
+          'method',
+          'mode',
+          'gateway',
+        ]) ??
+        'QR Scan';
+
+    return PosPaymentSuccessData(
+      orderId: orderId.toString(),
+      amountPaid: amountText,
+      amountLabel: 'Bill Amount',
+      paymentMethod: paymentMethod,
+      dateTimeText: DateTime.now()
+          .toLocal()
+          .toIso8601String()
+          .replaceFirst('T', ' ')
+          .split('.')
+          .first,
+      orderedItems: orderedItems,
+      title: 'Payment Received',
+      subtitle: 'Receipt Printing',
+    );
+  }
+
+  List<String> _extractPopupOrderedItems(dynamic payload) {
+    final rawItems = _findLikelyOrderItemsList(payload);
+    if (rawItems.isEmpty) return const [];
+    final lines = <String>[];
+    for (final item in rawItems) {
+      if (item is! Map) continue;
+      final map = Map<String, dynamic>.from(item);
+      final nested = map['item'] is Map
+          ? Map<String, dynamic>.from(map['item'] as Map)
+          : map['menu_item'] is Map
+              ? Map<String, dynamic>.from(map['menu_item'] as Map)
+              : const <String, dynamic>{};
+      final name = (map['name'] ??
+              map['item_name'] ??
+              map['menu_item_name'] ??
+              nested['name'] ??
+              nested['item_name'] ??
+              '')
+          .toString()
+          .trim();
+      if (name.isEmpty) continue;
+      final qty = _asNumSafe(
+            map['qty'] ?? map['quantity'] ?? map['count'] ?? map['qty_ordered'],
+          ) ??
+          _asNumSafe(
+              map['pivot'] is Map ? (map['pivot'] as Map)['quantity'] : 0) ??
+          1;
+      final price = _asNumSafe(
+            map['price'] ??
+                map['unit_price'] ??
+                map['amount'] ??
+                map['total'] ??
+                nested['price'],
+          ) ??
+          0;
+      final qtyText = qty % 1 == 0 ? qty.toStringAsFixed(0) : qty.toString();
+      final lineTotal = qty * price;
+      final lineAmount = lineTotal % 1 == 0
+          ? lineTotal.toStringAsFixed(0)
+          : lineTotal.toStringAsFixed(2);
+      lines.add('$qtyText x $name (Rs $lineAmount)');
+      if (lines.length >= 6) break;
+    }
+    return lines;
+  }
+
+  List<dynamic> _findLikelyOrderItemsList(dynamic value, {int depth = 5}) {
+    if (value == null || depth <= 0) return const [];
+    if (value is Map) {
+      for (final key in const [
+        'order_items',
+        'items',
+        'orderItems',
+        'order_item_list',
+        'orderDetails',
+      ]) {
+        final candidate = value[key];
+        if (candidate is List && _looksLikeOrderItemsList(candidate)) {
+          return candidate;
+        }
+      }
+      final nestedOrder = value['order'];
+      if (nestedOrder is Map) {
+        final nested = _findLikelyOrderItemsList(nestedOrder, depth: depth - 1);
+        if (nested.isNotEmpty) return nested;
+      }
+      final nestedData = value['data'];
+      if (nestedData != null) {
+        final nested = _findLikelyOrderItemsList(nestedData, depth: depth - 1);
+        if (nested.isNotEmpty) return nested;
+      }
+      for (final entry in value.entries) {
+        final nested = _findLikelyOrderItemsList(entry.value, depth: depth - 1);
+        if (nested.isNotEmpty) return nested;
+      }
+    } else if (value is List) {
+      if (_looksLikeOrderItemsList(value)) return value;
+      for (final item in value) {
+        final nested = _findLikelyOrderItemsList(item, depth: depth - 1);
+        if (nested.isNotEmpty) return nested;
+      }
+    }
+    return const [];
+  }
+
+  bool _looksLikeOrderItemsList(List<dynamic> list) {
+    if (list.isEmpty) return false;
+    final first = list.first;
+    if (first is! Map) return false;
+    final keys = first.keys.map((key) => key.toString()).toSet();
+    return keys.contains('name') ||
+        keys.contains('item_name') ||
+        keys.contains('menu_item_name') ||
+        keys.contains('qty') ||
+        keys.contains('quantity') ||
+        keys.contains('price') ||
+        keys.contains('amount');
+  }
+
+  String? _findTextByKeys(dynamic value, List<String> keys, {int depth = 5}) {
+    if (value == null || depth <= 0) return null;
+    if (value is Map) {
+      for (final key in keys) {
+        if (value.containsKey(key)) {
+          final raw = value[key];
+          if (raw != null) {
+            final text = raw.toString().trim();
+            if (text.isNotEmpty) return text;
+          }
+        }
+      }
+      for (final entry in value.entries) {
+        final nested = _findTextByKeys(entry.value, keys, depth: depth - 1);
+        if (nested != null && nested.isNotEmpty) return nested;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        final nested = _findTextByKeys(item, keys, depth: depth - 1);
+        if (nested != null && nested.isNotEmpty) return nested;
+      }
+    }
+    return null;
+  }
+
+  num? _findNumByKeys(dynamic value, List<String> keys, {int depth = 5}) {
+    if (value == null || depth <= 0) return null;
+    if (value is Map) {
+      for (final key in keys) {
+        if (value.containsKey(key)) {
+          final parsed = _asNumSafe(value[key]);
+          if (parsed != null) return parsed;
+        }
+      }
+      for (final entry in value.entries) {
+        final nested = _findNumByKeys(entry.value, keys, depth: depth - 1);
+        if (nested != null) return nested;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        final nested = _findNumByKeys(item, keys, depth: depth - 1);
+        if (nested != null) return nested;
+      }
+    }
+    return null;
+  }
+
+  num? _asNumSafe(dynamic value) {
+    if (value == null) return null;
+    if (value is num) return value;
+    return num.tryParse(value.toString());
+  }
+
+  Future<T> _withGlobalKioskRecovery<T>(Future<T> Function() action) async {
+    try {
+      return await action();
+    } catch (e) {
+      final message = e.toString().toLowerCase();
+      final needsRecovery = message.contains('kiosk token missing') ||
+          message.contains('auth_token') ||
+          message.contains('restaurant_not_configured') ||
+          message.contains('restaurant not configured') ||
+          message.contains('unauthorized');
+      if (!needsRecovery) rethrow;
+      await DeviceBootstrap.ensureDeviceReady();
+      return action();
+    }
+  }
+
+  bool _looksLikeServerErrorText(String message) {
+    final m = message.toLowerCase();
+    return m.contains('500') ||
+        m.contains('server error') ||
+        m.contains('internal server error');
+  }
+
+  Future<_GlobalScanPaymentState> _resolveGlobalScanPaymentState(
+    int orderId,
+  ) async {
+    try {
+      final paymentRes = await _withGlobalKioskRecovery(
+        () => KioskApi().checkPayment(orderId),
+      );
+      if (_containsPaidState(paymentRes.data, 5)) {
+        return _GlobalScanPaymentState.paid;
+      }
+      return _GlobalScanPaymentState.unpaid;
+    } on DioException catch (e) {
+      final code = e.response?.statusCode ?? 0;
+      if (code == 404 || code == 400) return _GlobalScanPaymentState.unpaid;
+      return _GlobalScanPaymentState.unverifiedServerError;
+    } catch (e) {
+      if (_looksLikeServerErrorText(e.toString())) {
+        return _GlobalScanPaymentState.unverifiedServerError;
+      }
+      return _GlobalScanPaymentState.unverifiedServerError;
+    }
+  }
+
+  String _friendlyDioError(Object e) {
+    if (e is DioException) {
+      final status = e.response?.statusCode;
+      final path = e.requestOptions.path;
+      final base = e.requestOptions.baseUrl;
+      if (status != null) {
+        return 'HTTP $status ($base$path)';
+      }
+      return '$base$path: ${e.message ?? e.type.name}';
+    }
+    return e.toString();
   }
 
   bool _containsPaidState(dynamic value, int depth) {
@@ -827,4 +1255,16 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
   }
+}
+
+class _GlobalScanTask {
+  final int orderId;
+  final String source;
+  final String rawValue;
+
+  const _GlobalScanTask({
+    required this.orderId,
+    required this.source,
+    required this.rawValue,
+  });
 }

@@ -5,14 +5,10 @@ import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/kiosk_api.dart';
-import '../printer/register_kiosk.dart';
-import '../printer/printer_s.dart';
-import '../screens/register_screen.dart';
 import '../screens/main_navigation.dart';
 import '../screens/pin_screen.dart';
 
@@ -24,30 +20,19 @@ class WelcomeScreen extends StatefulWidget {
 }
 
 class _WelcomeScreenState extends State<WelcomeScreen>
-    with WidgetsBindingObserver {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
+  late PageController _pageController;
   Timer? _sliderTimer;
-  Timer? _adminTapResetTimer;
-  Timer? _scanIdleTimer;
-  Timer? _scanFocusKeepAliveTimer;
   VoidCallback? _maintenanceListener;
   VoidCallback? _mediaRefreshListener;
   int _mediaRefreshKey = 0;
 
   bool isLoading = true;
   bool hasError = false;
-  String? _errorDetails;
   bool _openingAdmin = false;
   bool _openingOrder = false;
   bool _loadingRestaurant = false;
-  bool _webMenuRedirected = false;
-  bool _scanPrintInProgress = false;
   VoidCallback? _onlineListener;
-  int _adminTapCount = 0;
-  String _lastConsumedScan = "";
-  DateTime _lastConsumedScanAt = DateTime.fromMillisecondsSinceEpoch(0);
-
-  final TextEditingController _scannerCtrl = TextEditingController();
-  final FocusNode _scannerFocusNode = FocusNode(debugLabel: "welcome-scanner");
 
   String restaurantName = "Start Your Order";
   List<String> banners = [];
@@ -55,31 +40,11 @@ class _WelcomeScreenState extends State<WelcomeScreen>
   bool _showDineIn = true;
   bool _showPickup = true;
 
-  Future<void> _redirectToRegisterScreen() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove("auth_token");
-    await prefs.remove("admin_token");
-    await prefs.remove("device_uuid");
-    await prefs.remove("device_id");
-    await prefs.setBool("kiosk_setup_done", false);
-
-    if (!mounted) return;
-
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(
-        builder: (_) =>
-            kIsWeb ? const UserIdScreen() : const RegisterKioskScreen(),
-      ),
-      (_) => false,
-    );
-  }
-
   @override
   void initState() {
     super.initState();
-    if (!kIsWeb) {
-      WidgetsBinding.instance.addObserver(this);
-    }
+    WidgetsBinding.instance.addObserver(this);
+    _pageController = PageController();
 
     _loadRestaurant();
 
@@ -97,36 +62,18 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     };
     ConnectivityService.instance.isOnline.addListener(_onlineListener!);
 
-    if (!kIsWeb) {
-      _maintenanceListener = _handleMaintenanceTick;
-      KioskMemoryService.instance.maintenanceTick.addListener(
-        _maintenanceListener!,
-      );
-      _mediaRefreshListener = _handleMediaRefreshTick;
-      KioskMemoryService.instance.mediaRefreshTick.addListener(
-        _mediaRefreshListener!,
-      );
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _focusScannerInput();
-      });
-      _scanFocusKeepAliveTimer = Timer.periodic(
-        const Duration(milliseconds: 900),
-        (_) {
-          if (!mounted ||
-              _scanPrintInProgress ||
-              _openingOrder ||
-              _openingAdmin) {
-            return;
-          }
-          _focusScannerInput();
-        },
-      );
-    }
+    _maintenanceListener = _handleMaintenanceTick;
+    KioskMemoryService.instance.maintenanceTick.addListener(
+      _maintenanceListener!,
+    );
+    _mediaRefreshListener = _handleMediaRefreshTick;
+    KioskMemoryService.instance.mediaRefreshTick.addListener(
+      _mediaRefreshListener!,
+    );
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (kIsWeb) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
@@ -150,13 +97,6 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       final kioskSettings = res.data["kiosk_settings"];
 
       final backendDeviceId = kioskSettings?["device_id"];
-      final hasBackendDeviceId = backendDeviceId != null &&
-          backendDeviceId.toString().trim().isNotEmpty;
-      if (!hasBackendDeviceId) {
-        await _redirectToRegisterScreen();
-        return;
-      }
-
       if (backendDeviceId != null && backendDeviceId.toString().isNotEmpty) {
         await prefs.setString("device_uuid", backendDeviceId.toString());
       }
@@ -201,74 +141,22 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       setState(() {
         restaurantName = restaurant?["name"] ?? "Start Your Order";
         banners = tempBanners;
-        currentIndex =
-            tempBanners.isEmpty ? 0 : currentIndex % tempBanners.length;
         _showDineIn = types["dine_in"] ?? true;
         _showPickup = types["pickup"] ?? true;
         isLoading = false;
         hasError = false;
-        _errorDetails = null;
       });
-
-      if (kIsWeb && !_webMenuRedirected) {
-        _webMenuRedirected = true;
-        final orderType = _resolveInitialWebOrderType(types);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          Navigator.pushReplacement(
-            context,
-            PageRouteBuilder(
-              pageBuilder: (_, __, ___) => MainNavigation(orderType: orderType),
-              transitionDuration: Duration.zero,
-              reverseTransitionDuration: Duration.zero,
-            ),
-          );
-        });
-        return;
-      }
 
       _startSlider();
     } catch (e) {
-      final rawError = e.toString();
-      final isRestaurantNotConfigured =
-          rawError.contains("RESTAURANT_NOT_CONFIGURED");
-
-      if (kIsWeb && isRestaurantNotConfigured) {
-        await _redirectToRegisterScreen();
-        return;
-      }
-
       if (!mounted) return;
       setState(() {
         hasError = true;
         isLoading = false;
-        _errorDetails = rawError;
       });
     } finally {
       _loadingRestaurant = false;
     }
-  }
-
-  String _resolveInitialWebOrderType(Map<String, bool> types) {
-    final requested = Uri.base.queryParameters["order_type"] ??
-        Uri.base.queryParameters["orderType"] ??
-        Uri.base.queryParameters["type"];
-    final normalizedRequested =
-        requested == null ? null : _normalizeOrderType(requested);
-
-    if (normalizedRequested == "pickup" ||
-        normalizedRequested == "takeaway" ||
-        normalizedRequested == "take_away") {
-      if (types["pickup"] == true) return "pickup";
-    }
-
-    if (normalizedRequested == "dine_in" || normalizedRequested == "dinein") {
-      if (types["dine_in"] == true) return "dine_in";
-    }
-
-    if (types["dine_in"] == true) return "dine_in";
-    if (types["pickup"] == true) return "pickup";
-    return "dine_in";
   }
 
   void _startSlider() {
@@ -276,10 +164,15 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     if (!KioskConfig.enableAutoScroll) return;
     if (banners.length < 2) return;
     _sliderTimer = Timer.periodic(const Duration(seconds: 6), (_) {
-      if (!mounted || banners.isEmpty) return;
-      setState(() {
+      try {
+        if (!_pageController.hasClients) return;
         currentIndex = (currentIndex + 1) % banners.length;
-      });
+        _pageController.animateToPage(
+          currentIndex,
+          duration: const Duration(milliseconds: 1500),
+          curve: Curves.easeInOutSine,
+        );
+      } catch (_) {}
     });
   }
 
@@ -288,6 +181,12 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     try {
       _sliderTimer?.cancel();
       if (banners.length < 2) return;
+      final int page = _pageController.hasClients
+          ? (_pageController.page?.round() ?? currentIndex)
+          : currentIndex;
+      _pageController.dispose();
+      _pageController = PageController(initialPage: page);
+      currentIndex = page;
       _startSlider();
     } catch (_) {}
   }
@@ -298,232 +197,9 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     setState(() {});
   }
 
-  void _focusScannerInput() {
-    if (kIsWeb) return;
-    if (_scannerFocusNode.canRequestFocus && !_scannerFocusNode.hasFocus) {
-      _scannerFocusNode.requestFocus();
-    }
-  }
-
-  String _normalizeScanInput(String raw) {
-    return raw
-        .replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), '')
-        .replaceAll(RegExp(r'\s+'), '')
-        .trim();
-  }
-
-  void _handleScannerChanged(String value) {
-    _scanIdleTimer?.cancel();
-    _scanIdleTimer = Timer(const Duration(milliseconds: 450), () {
-      final captured = _scannerCtrl.text;
-      _scannerCtrl.clear();
-      unawaited(_consumeScannerValue(captured));
-    });
-  }
-
-  void _handleScannerSubmitted(String value) {
-    _scanIdleTimer?.cancel();
-    _scannerCtrl.clear();
-    unawaited(_consumeScannerValue(value));
-  }
-
-  int? _extractOrderIdFromScan(String value) {
-    final normalized = _normalizeScanInput(value).toLowerCase();
-    if (normalized.isEmpty) return null;
-
-    final pickupTagged = RegExp(r'print[_\-:]?order[_\-:]?(\d{1,12})')
-        .firstMatch(normalized);
-    if (pickupTagged != null) {
-      final parsed = int.tryParse(pickupTagged.group(1) ?? "");
-      if (parsed != null && parsed > 0) return parsed;
-    }
-
-    final direct = int.tryParse(normalized);
-    if (direct != null && direct > 0) return direct;
-
-    final prefixed = RegExp(r'^(order[:\-_]|selfx[:\-_]?order[:\-_]?)(\d+)$')
-        .firstMatch(normalized);
-    if (prefixed != null) {
-      final prefixedValue = int.tryParse(prefixed.group(2) ?? "");
-      if (prefixedValue != null && prefixedValue > 0) return prefixedValue;
-    }
-
-    final isTaggedScan =
-        normalized.contains("order") || normalized.contains("selfx");
-    if (isTaggedScan) {
-      final anyDigits = RegExp(r'(\d{1,12})').allMatches(normalized);
-      if (anyDigits.isNotEmpty) {
-        final candidate = anyDigits.last.group(1);
-        final parsed = int.tryParse(candidate ?? "");
-        if (parsed != null && parsed > 0) return parsed;
-      }
-    }
-    return null;
-  }
-
-  bool _isPaidStatus(dynamic status) {
-    if (status == true) return true;
-    if (status is num) return status == 1;
-    final s = status?.toString().trim().toLowerCase() ?? "";
-    if (s.isEmpty) return false;
-    if (s.contains("cancel") ||
-        s.contains("refund") ||
-        s.contains("failed") ||
-        s.contains("void") ||
-        s.contains("unpaid") ||
-        s.contains("pending")) {
-      return false;
-    }
-    return s.contains("paid") ||
-        s.contains("completed") ||
-        s.contains("success") ||
-        s.contains("successful") ||
-        s.contains("captured") ||
-        s.contains("authorized");
-  }
-
-  bool _containsPaidState(dynamic value, int depth) {
-    if (value == null || depth <= 0) return false;
-    if (value is Map) {
-      for (final key in const [
-        "status",
-        "payment_status",
-        "paymentStatus",
-        "order_status",
-        "orderStatus",
-        "state",
-        "payment_state",
-        "paymentState",
-        "paid",
-        "is_paid",
-        "isPaid",
-        "success",
-        "is_success",
-        "isSuccess",
-        "result",
-        "message",
-      ]) {
-        if (value.containsKey(key) && _isPaidStatus(value[key])) {
-          return true;
-        }
-      }
-      for (final nestedKey in const [
-        "data",
-        "order",
-        "payment",
-        "response",
-        "result",
-        "payload",
-      ]) {
-        if (value.containsKey(nestedKey) &&
-            _containsPaidState(value[nestedKey], depth - 1)) {
-          return true;
-        }
-      }
-      for (final entry in value.entries) {
-        if (_containsPaidState(entry.value, depth - 1)) {
-          return true;
-        }
-      }
-    } else if (value is List) {
-      for (final item in value) {
-        if (_containsPaidState(item, depth - 1)) return true;
-      }
-    } else if (_isPaidStatus(value)) {
-      return true;
-    }
-    return false;
-  }
-
-  Future<void> _consumeScannerValue(String raw) async {
-    if (!mounted || kIsWeb) return;
-    if (_scanPrintInProgress || _openingOrder || _openingAdmin || isLoading) {
-      return;
-    }
-    final value = _normalizeScanInput(raw);
-    if (value.isEmpty) {
-      _focusScannerInput();
-      return;
-    }
-
-    final now = DateTime.now();
-    if (_lastConsumedScan == value &&
-        now.difference(_lastConsumedScanAt) <
-            const Duration(milliseconds: 900)) {
-      _focusScannerInput();
-      return;
-    }
-    _lastConsumedScan = value;
-    _lastConsumedScanAt = now;
-
-    final orderId = _extractOrderIdFromScan(value);
-    if (orderId == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Invalid scan "$value". Please scan order QR.'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-      _focusScannerInput();
-      return;
-    }
-
-    _scanPrintInProgress = true;
-    try {
-      final paymentRes = await KioskApi().checkPayment(orderId);
-      final isPaid = _containsPaidState(paymentRes.data, 5);
-      if (!isPaid) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text("Order #$orderId is not paid yet."),
-              behavior: SnackBarBehavior.floating,
-              backgroundColor: Colors.orange.shade800,
-            ),
-          );
-        }
-        return;
-      }
-
-      await PrinterService().printOrder(
-        orderId: orderId,
-        cartItems: const [],
-        restaurantName: restaurantName,
-        paymentMode: "PAID",
-      );
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Order #$orderId printed successfully."),
-            behavior: SnackBarBehavior.floating,
-            backgroundColor: Colors.green.shade700,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Print failed for order #$orderId: $e"),
-            behavior: SnackBarBehavior.floating,
-            backgroundColor: Colors.red.shade700,
-          ),
-        );
-      }
-    } finally {
-      _scanPrintInProgress = false;
-      _focusScannerInput();
-    }
-  }
-
   @override
   void dispose() {
-    if (!kIsWeb) {
-      WidgetsBinding.instance.removeObserver(this);
-    }
+    WidgetsBinding.instance.removeObserver(this);
     if (_onlineListener != null) {
       ConnectivityService.instance.isOnline.removeListener(_onlineListener!);
     }
@@ -537,79 +213,25 @@ class _WelcomeScreenState extends State<WelcomeScreen>
         _mediaRefreshListener!,
       );
     }
-    _adminTapResetTimer?.cancel();
-    _scanIdleTimer?.cancel();
-    _scanFocusKeepAliveTimer?.cancel();
     _sliderTimer?.cancel();
-    _scannerCtrl.dispose();
-    _scannerFocusNode.dispose();
+    _pageController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (kIsWeb) {
-      if (hasError) {
-        return _buildWebErrorScreen();
-      }
-      return _buildWebLoadingScreen();
-    }
-
     if (hasError) {
-      return Scaffold(
+      return const Scaffold(
         backgroundColor: Colors.black,
         body: Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.cloud_off_rounded, color: Colors.white, size: 44),
-                const SizedBox(height: 12),
-                const Text(
-                  "Unable to load kiosk screen",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                if (_errorDetails != null && _errorDetails!.trim().isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    _errorDetails!,
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: _loadRestaurant,
-                  child: const Text("Retry"),
-                ),
-              ],
-            ),
-          ),
+          child: CircularProgressIndicator(color: Colors.white),
         ),
       );
     }
     if (isLoading) {
       return const Scaffold(
         backgroundColor: Colors.black,
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(color: Colors.white),
-              SizedBox(height: 12),
-              Text(
-                "Loading kiosk data...",
-                style: TextStyle(color: Colors.white70),
-              ),
-            ],
-          ),
-        ),
+        body: Center(child: CircularProgressIndicator(color: Colors.white)),
       );
     }
 
@@ -621,252 +243,156 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     final int bannerCacheHeight = (screenSize.height * dpr).round();
 
     return Scaffold(
-      body: Listener(
-        behavior: HitTestBehavior.translucent,
-        onPointerDown: (_) {
-          if (_openingAdmin) return;
-          _handleHiddenAdminTap();
-          _focusScannerInput();
-        },
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: banners.isEmpty
-                  ? Container(color: Colors.black)
-                  : AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 900),
-                      switchInCurve: Curves.easeInOut,
-                      switchOutCurve: Curves.easeInOut,
-                      transitionBuilder: (child, animation) =>
-                          FadeTransition(opacity: animation, child: child),
-                      child: Image.network(
-                        banners[currentIndex % banners.length],
-                        key: ValueKey(
-                          "banner-refresh-$_mediaRefreshKey-${currentIndex % banners.length}",
-                        ),
-                        fit: BoxFit.cover,
-                        cacheWidth: bannerCacheWidth,
-                        cacheHeight: bannerCacheHeight,
-                        filterQuality: FilterQuality.low,
-                      ),
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: banners.isEmpty
+                ? Container(color: Colors.black)
+                : PageView.builder(
+                    key: ValueKey("banner-refresh-$_mediaRefreshKey"),
+                    controller: _pageController,
+                    itemCount: banners.length,
+                    itemBuilder: (_, i) => Image.network(
+                      banners[i],
+                      fit: BoxFit.cover,
+                      cacheWidth: bannerCacheWidth,
+                      cacheHeight: bannerCacheHeight,
+                      filterQuality: FilterQuality.low,
                     ),
-            ),
-            Positioned.fill(
-              child: Container(
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.black38,
-                      Colors.transparent,
-                      Colors.black87
-                    ],
                   ),
+          ),
+          Positioned.fill(
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Colors.black38, Colors.transparent, Colors.black87],
                 ),
               ),
             ),
-            Positioned(
-              top: -5,
-              left: -30,
-              right: -10, // 🔒 full width so right alignment works
-              child: SafeArea(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: isTablet ? 40 : 16,
-                    vertical: 10,
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: _glassContainer(
-                            isTablet: isTablet,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  restaurantName.toUpperCase(),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: isTablet ? 24 : 16,
-                                    fontWeight: FontWeight.w900,
-                                    letterSpacing: 1.2,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  "(A PRODUCT OF SIRIXO)",
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: isTablet ? 12 : 10,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 1.1,
-                                  ),
-                                ),
-                              ],
+          ),
+          Positioned(
+            top: -5,
+            left: -30,
+            right: -10, // 🔒 full width so right alignment works
+            child: SafeArea(
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: isTablet ? 40 : 16,
+                  vertical: 10,
+                ),
+                child: Row(
+                  children: [
+                    _glassContainer(
+                      isTablet: isTablet,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            restaurantName.toUpperCase(),
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: isTablet ? 24 : 16,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.2,
                             ),
                           ),
-                        ),
+                          const SizedBox(height: 4),
+                          Text(
+                            "(A PRODUCT OF SIRIXO)",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: isTablet ? 12 : 10,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 1.1,
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+
+                    const Spacer(), // 👈 pushes icon to the right
+
+                    _adminWithStatus(isTablet),
+                  ],
                 ),
               ),
             ),
-            Positioned(
-              bottom: isTablet ? 80 : 40,
-              left: isTablet ? 100 : 20,
-              right: isTablet ? 80 : 20,
-              child: _orderPanel(isTablet),
-            ),
-            if (!kIsWeb)
-              Positioned(
-                left: 0,
-                top: 0,
-                width: 1,
-                height: 1,
-                child: TextField(
-                  controller: _scannerCtrl,
-                  focusNode: _scannerFocusNode,
-                  autofocus: true,
-                  onChanged: _handleScannerChanged,
-                  onSubmitted: _handleScannerSubmitted,
-                  enableInteractiveSelection: false,
-                  showCursor: false,
-                  decoration: const InputDecoration(
-                    isCollapsed: true,
-                    border: InputBorder.none,
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                  style: const TextStyle(
-                    fontSize: 1,
-                    color: Colors.transparent,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildWebLoadingScreen() {
-    return const Scaffold(
-      backgroundColor: Colors.white,
-      body: Center(
-        child: CircularProgressIndicator(),
-      ),
-    );
-  }
-
-  Widget _buildWebErrorScreen() {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(
-                Icons.cloud_off_rounded,
-                color: Colors.white,
-                size: 44,
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                "Web startup failed",
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                "This usually means a web-only startup problem such as CORS or mobile-only code being used in the browser.",
-                style: TextStyle(color: Colors.white70, height: 1.4),
-                textAlign: TextAlign.center,
-              ),
-              if (_errorDetails != null &&
-                  _errorDetails!.trim().isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.06),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: Colors.white.withOpacity(0.12),
-                    ),
-                  ),
-                  child: Text(
-                    _errorDetails!,
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 12,
-                      height: 1.35,
-                    ),
-                    textAlign: TextAlign.left,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 18),
-              ElevatedButton(
-                onPressed: () {
-                  setState(() {
-                    isLoading = true;
-                    hasError = false;
-                  });
-                  _loadRestaurant();
-                },
-                child: const Text("Retry"),
-              ),
-            ],
           ),
-        ),
+
+          Positioned(
+            bottom: isTablet ? 80 : 40,
+            left: isTablet ? 100 : 20,
+            right: isTablet ? 80 : 20,
+            child: _orderPanel(isTablet),
+          ),
+        ],
       ),
     );
   }
 
-  void _handleHiddenAdminTap() {
-    _adminTapResetTimer?.cancel();
-    _adminTapCount += 1;
-
-    if (_adminTapCount >= 5) {
-      _adminTapCount = 0;
-      _openAdminPin();
-      return;
-    }
-
-    _adminTapResetTimer = Timer(const Duration(seconds: 3), () {
-      _adminTapCount = 0;
-    });
+  Widget _adminWithStatus(bool isTablet) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: ConnectivityService.instance.isOnline,
+      builder: (_, online, __) {
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            _adminButton(isTablet),
+            Positioned(
+              top: -10,
+              right: -25,
+              child: Container(
+                width: isTablet ? 12 : 10,
+                height: isTablet ? 12 : 10,
+                decoration: BoxDecoration(
+                  color: online
+                      ? const Color.fromARGB(151, 105, 240, 175)
+                      : Colors.redAccent,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: online ? Colors.green : Colors.red,
+                      blurRadius: 6,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
-  Future<void> _openAdminPin() async {
-    if (_openingAdmin || !mounted) return;
-    setState(() => _openingAdmin = true);
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const PinScreen(),
+  Widget _adminButton(bool isTablet) {
+    return IconButton(
+      icon: Icon(
+        Icons.person_rounded,
+        color: Colors.white,
+        size: isTablet ? 30 : 30,
+      ),
+      onPressed: _openingAdmin
+          ? null
+          : () async {
+              setState(() => _openingAdmin = true);
+              await showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (_) => const PinScreen(),
+              );
+              if (!mounted) return;
+              setState(() {
+                _openingAdmin = false;
+                isLoading = true;
+              });
+              _loadRestaurant();
+            },
     );
-    if (!mounted) return;
-    setState(() {
-      _openingAdmin = false;
-      isLoading = true;
-    });
-    _loadRestaurant();
   }
 
   Widget _orderPanel(bool isTablet) {
@@ -889,6 +415,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             ),
           ),
           const SizedBox(height: 10),
+
           const SizedBox(height: 40),
           if (_showDineIn || _showPickup)
             Builder(
@@ -898,7 +425,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     child: SizedBox(
                       width: isTablet ? 360 : 240,
                       child: _orderButton(
-                        "   EAT HERE",
+                        "EAT HERE",
                         Icons.restaurant_rounded,
                         Colors.green.shade700,
                         "dine_in",
@@ -1042,7 +569,8 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     final sources = [kioskSettings, restaurant];
     for (final src in sources) {
       if (src is! Map) continue;
-      final v = src["gst_number"] ??
+      final v =
+          src["gst_number"] ??
           src["gstin"] ??
           src["tax_id"] ??
           src["taxId"] ??
@@ -1107,7 +635,8 @@ class _WelcomeScreenState extends State<WelcomeScreen>
               Navigator.pushReplacement(
                 context,
                 PageRouteBuilder(
-                  pageBuilder: (_, __, ___) => MainNavigation(orderType: type),
+                  pageBuilder: (_, __, ___) =>
+                      MainNavigation(orderType: type),
                   transitionDuration: Duration.zero,
                   reverseTransitionDuration: Duration.zero,
                 ),
@@ -1159,10 +688,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     return ClipRRect(
       borderRadius: BorderRadius.circular(15),
       child: Container(
-        constraints: BoxConstraints(
-          minWidth: isTablet ? 260 : 0,
-          maxWidth: isTablet ? 420 : 220,
-        ),
+        constraints: BoxConstraints(minWidth: isTablet ? 260 : 180),
         padding: EdgeInsets.symmetric(
           horizontal: isTablet ? 20 : 14,
           vertical: isTablet ? 10 : 8,
