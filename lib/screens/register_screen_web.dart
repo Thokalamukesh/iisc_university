@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/providers/restaurant_provider.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
@@ -7,7 +5,6 @@ import 'package:api_selfxo_project/services/auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../widget/app_network_image_web.dart';
 
 class UserIdScreen extends StatefulWidget {
@@ -24,7 +21,11 @@ class _UserIdScreenState extends State<UserIdScreen> {
   bool loading = false;
   bool _loadingRestaurants = true;
   String? _restaurantLoadError;
-  Map<String, dynamic>? _selectedRestaurant;
+  int _selectedCategoryIndex = 0;
+
+  // Design Constants
+  final Color primaryBrand = const Color(0xFFD32F2F);
+  final Color background = const Color(0xFFFCFCFC);
 
   @override
   void initState() {
@@ -34,13 +35,11 @@ class _UserIdScreenState extends State<UserIdScreen> {
     });
   }
 
+  // --- LOGIC KEPT AS IS ---
   Future<void> _bootstrapWebRegister() async {
     try {
       final restaurantProvider = context.read<RestaurantProvider>();
-      await restaurantProvider
-          .initializeForWeb()
-          .timeout(const Duration(seconds: 8));
-
+      await restaurantProvider.initializeForWeb();
       if (!mounted) return;
       final restaurants = restaurantProvider.restaurants;
       setState(() {
@@ -49,28 +48,18 @@ class _UserIdScreenState extends State<UserIdScreen> {
           ..addAll(restaurants);
         _loadingRestaurants = false;
         _restaurantLoadError = restaurants.isEmpty
-            ? (restaurantProvider.errorMessage ?? "Unable to load restaurants")
+            ? (restaurantProvider.errorMessage ?? "Unable to load")
             : null;
       });
     } catch (e, stackTrace) {
-      kioskLogError(
-        'Web register bootstrap failed: $e',
-        tag: 'WEB_RESTAURANTS',
-        error: e,
-        stackTrace: stackTrace,
-      );
+      kioskLogError('Web register bootstrap failed: $e',
+          tag: 'WEB_RESTAURANTS', error: e, stackTrace: stackTrace);
       if (!mounted) return;
       setState(() {
         _loadingRestaurants = false;
-        _restaurantLoadError = "Unable to load restaurants";
+        _restaurantLoadError = "Unable to load";
       });
     }
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
   }
 
   Future<void> _loadWebRestaurants() async {
@@ -80,9 +69,7 @@ class _UserIdScreenState extends State<UserIdScreen> {
     });
     try {
       final restaurantProvider = context.read<RestaurantProvider>();
-      await restaurantProvider
-          .refreshRestaurants()
-          .timeout(const Duration(seconds: 8));
+      await restaurantProvider.refreshRestaurants();
       final restaurants = restaurantProvider.restaurants;
       if (!mounted) return;
       setState(() {
@@ -90,41 +77,14 @@ class _UserIdScreenState extends State<UserIdScreen> {
           ..clear()
           ..addAll(restaurants);
         _loadingRestaurants = false;
-        _restaurantLoadError = restaurants.isEmpty
-            ? (restaurantProvider.errorMessage ?? "Unable to load restaurants")
-            : null;
       });
-    } catch (e, stackTrace) {
-      kioskLogError(
-        'Direct web restaurant load failed: $e',
-        tag: 'WEB_RESTAURANTS',
-        error: e,
-        stackTrace: stackTrace,
-      );
+    } catch (e) {
       if (!mounted) return;
       setState(() {
         _loadingRestaurants = false;
-        _restaurantLoadError = "Unable to load restaurants";
+        _restaurantLoadError = "Retry";
       });
     }
-  }
-
-  String _normalized(String value) => value.trim().toLowerCase();
-
-  String? _restaurantLogoUrl(Map<String, dynamic> restaurant) {
-    final raw = restaurant["logo_url"]?.toString().trim();
-    if (raw == null || raw.isEmpty) return null;
-    return raw;
-  }
-
-  List<Map<String, dynamic>> _filteredRestaurants() {
-    final query = _normalized(controller.text);
-    if (query.isEmpty) return _webRestaurants;
-
-    return _webRestaurants.where((restaurant) {
-      final name = restaurant["name"]?.toString() ?? "";
-      return _normalized(name).contains(query);
-    }).toList();
   }
 
   Future<void> _openRestaurantMenu(Map<String, dynamic> restaurant) async {
@@ -134,410 +94,336 @@ class _UserIdScreenState extends State<UserIdScreen> {
     final restaurantName = restaurant["name"]?.toString().trim() ?? "";
     final restaurantId =
         restaurantNumericId.isNotEmpty ? restaurantNumericId : restaurantHash;
-    if (restaurantId.isEmpty) {
-      _showError("Selected restaurant is invalid");
-      return;
-    }
 
     setState(() {
       loading = true;
-      _selectedRestaurant = restaurant;
     });
-
     final prefs = await SharedPreferences.getInstance();
     final previousRestaurantId = prefs.getString("restaurant_id")?.trim() ?? "";
-    final previousRestaurantHash =
-        prefs.getString("restaurant_hash")?.trim() ?? "";
-    final changedRestaurant = previousRestaurantId.isNotEmpty &&
-        previousRestaurantId != restaurantId &&
-        previousRestaurantHash != restaurantHash;
+    final changedRestaurant =
+        previousRestaurantId.isNotEmpty && previousRestaurantId != restaurantId;
+
     if (changedRestaurant) {
       await prefs.remove("auth_token");
       await prefs.remove("admin_token");
-      await prefs.remove("branch_id");
-      await prefs.remove("home_banner_url");
-      await prefs.remove("gst_number");
     }
     await prefs.setString("restaurant_id", restaurantId);
-    if (restaurantHash.isNotEmpty) {
-      await prefs.setString("restaurant_hash", restaurantHash);
-    }
-    if (restaurantName.isNotEmpty) {
-      await prefs.setString("restaurant_name", restaurantName);
+    await prefs.setString("restaurant_hash", restaurantHash);
+    await prefs.setString("restaurant_name", restaurantName);
+
+    final initialized = await AuthService().initializeKiosk(
+      force: changedRestaurant,
+    );
+    if (!initialized) {
+      if (!mounted) return;
+      setState(() => loading = false);
+      final reason =
+          AuthService.lastFailureReason ?? "Kiosk registration failed";
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(reason)),
+      );
+      return;
     }
     await prefs.setBool("kiosk_setup_done", true);
-    unawaited(AuthService().initializeKiosk(force: changedRestaurant));
 
     if (!mounted) return;
     Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) => const MainNavigation(orderType: "dine_in"),
-      ),
-    );
+        context,
+        MaterialPageRoute(
+            builder: (_) => const MainNavigation(orderType: "dine_in")));
   }
 
-  void _showError(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), backgroundColor: Colors.red.shade800),
-    );
-  }
-
-  Widget _buildRestaurantCard(Map<String, dynamic> restaurant) {
-    final bool isSelected = _selectedRestaurant?["id"] == restaurant["id"];
-    final String name = restaurant["name"]?.toString().trim() ?? "Restaurant";
-    final String? logoUrl = _restaurantLogoUrl(restaurant);
-
-    return InkWell(
-      borderRadius: BorderRadius.circular(20),
-      onTap: () => _openRestaurantMenu(restaurant),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color:
-                isSelected ? const Color(0xFF9F342C) : const Color(0xFFE7E3DE),
-            width: isSelected ? 1.5 : 1,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(isSelected ? 0.10 : 0.05),
-              blurRadius: isSelected ? 20 : 14,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Container(
-                width: 90,
-                height: 90,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF5F2EE),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: logoUrl == null
-                    ? const Center(
-                        child: Icon(
-                          Icons.storefront_rounded,
-                          size: 34,
-                          color: Color(0xFF9F342C),
-                        ),
-                      )
-                    : AppNetworkImage(
-                        url: logoUrl,
-                        fit: BoxFit.cover,
-                        fallback: const Center(
-                          child: Icon(
-                            Icons.storefront_rounded,
-                            size: 34,
-                            color: Color(0xFF9F342C),
-                          ),
-                        ),
-                      ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      name,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                        color: Color(0xFF1F1F1F),
-                        height: 1.15,
-                        letterSpacing: 0.1,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: isSelected
-                        ? const [Color(0xFFB54439), Color(0xFF8E2A23)]
-                        : const [Color(0xFFF4E8DC), Color(0xFFECD9C8)],
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                  ),
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: (isSelected
-                              ? const Color(0xFF9F342C)
-                              : const Color(0xFFC58A5A))
-                          .withOpacity(0.18),
-                      blurRadius: 14,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
-                child: Icon(
-                  Icons.arrow_forward_rounded,
-                  size: 21,
-                  color: isSelected ? Colors.white : const Color(0xFF6E302A),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  // --- NEW UI BUILDERS ---
 
   @override
   Widget build(BuildContext context) {
-    final media = MediaQuery.of(context);
-    final isTablet = media.size.width > 700;
-    return Scaffold(
-      backgroundColor: const Color(0xFFF6F6F6),
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: DecoratedBox(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Color(0xFFF8F4EF), Color(0xFFF3ECE5)],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                ),
-              ),
-              child: SafeArea(
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: EdgeInsets.fromLTRB(
-                        isTablet ? 28 : 18,
-                        22,
-                        isTablet ? 28 : 18,
-                        14,
-                      ),
-                      child: Center(
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 980),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              ConstrainedBox(
-                                constraints: BoxConstraints(
-                                  maxWidth: isTablet ? 430 : double.infinity,
-                                ),
-                                child: TextField(
-                                  controller: controller,
-                                  onChanged: (_) => setState(() {}),
-                                  style: const TextStyle(fontSize: 14),
-                                  decoration: InputDecoration(
-                                    hintText: "Search restaurant",
-                                    hintStyle: const TextStyle(fontSize: 14),
-                                    prefixIcon: const Icon(
-                                      Icons.search_rounded,
-                                      size: 20,
-                                    ),
-                                    suffixIcon: controller.text.isEmpty
-                                        ? null
-                                        : IconButton(
-                                            onPressed: () {
-                                              controller.clear();
-                                              setState(() {});
-                                            },
-                                            icon: const Icon(
-                                              Icons.close,
-                                              size: 18,
-                                            ),
-                                          ),
-                                    filled: true,
-                                    fillColor: Colors.white,
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(16),
-                                      borderSide: BorderSide.none,
-                                    ),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(16),
-                                      borderSide: const BorderSide(
-                                        color: Color(0xFFE9E1D8),
-                                      ),
-                                    ),
-                                    focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(16),
-                                      borderSide: const BorderSide(
-                                        color: Color(0xFF9F342C),
-                                        width: 1.2,
-                                      ),
-                                    ),
-                                    isDense: true,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 13,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: Align(
-                        alignment: Alignment.topCenter,
-                        child: SingleChildScrollView(
-                          padding: const EdgeInsets.fromLTRB(24, 22, 24, 24),
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 980),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                if (_loadingRestaurants)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 32,
-                                    ),
-                                    alignment: Alignment.center,
-                                    child: Column(
-                                      children: [
-                                        SizedBox(
-                                          width: 54,
-                                          height: 54,
-                                          child: Stack(
-                                            alignment: Alignment.center,
-                                            children: const [
-                                              CircularProgressIndicator(
-                                                strokeWidth: 3,
-                                                color: Color(0xFF9F342C),
-                                              ),
-                                              Icon(
-                                                Icons.restaurant_menu_rounded,
-                                                size: 24,
-                                                color: Color(0xFF9F342C),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        SizedBox(height: 14),
-                                        Text(
-                                          "Loading restaurants...",
-                                          style: TextStyle(
-                                            color: Colors.black54,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  )
-                                else if (_restaurantLoadError != null)
-                                  Center(
-                                    child: SizedBox(
-                                      width: 220,
-                                      height: 44,
-                                      child: OutlinedButton(
-                                        onPressed: _loadWebRestaurants,
-                                        child: const Text("Retry loading"),
-                                      ),
-                                    ),
-                                  )
-                                else
-                                  Builder(
-                                    builder: (context) {
-                                      final filteredRestaurants =
-                                          _filteredRestaurants();
-                                      if (filteredRestaurants.isEmpty) {
-                                        return const Padding(
-                                          padding: EdgeInsets.symmetric(
-                                            vertical: 30,
-                                          ),
-                                          child: Text(
-                                            "No restaurants found.",
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              color: Colors.black54,
-                                            ),
-                                          ),
-                                        );
-                                      }
+    final filtered = _webRestaurants
+        .where((r) => r["name"]
+            .toString()
+            .toLowerCase()
+            .contains(controller.text.toLowerCase()))
+        .toList();
 
-                                      return ListView.separated(
-                                        shrinkWrap: true,
-                                        physics:
-                                            const NeverScrollableScrollPhysics(),
-                                        itemCount: filteredRestaurants.length,
-                                        separatorBuilder: (_, __) =>
-                                            const SizedBox(height: 14),
-                                        itemBuilder: (context, index) =>
-                                            _buildRestaurantCard(
-                                          filteredRestaurants[index],
-                                        ),
-                                      );
-                                    },
-                                  ),
-                              ],
-                            ),
+    return Scaffold(
+      backgroundColor: background,
+      body: SafeArea(
+        child: Column(
+          children: [
+            _buildHeader(),
+            _buildSearchBox(),
+            _buildCategories(),
+            Expanded(
+              child: _loadingRestaurants
+                  ? const Center(
+                      child: CircularProgressIndicator(color: Colors.red))
+                  : _restaurantLoadError != null
+                      ? Center(
+                          child: TextButton(
+                            onPressed: _loadWebRestaurants,
+                            child: const Text("Retry"),
                           ),
+                        )
+                      : ListView(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          children: [
+                            _buildPromoBanner(),
+                            const SizedBox(height: 16),
+                            ...filtered.map((r) => _buildRestaurantTile(r)),
+                            if (filtered.isEmpty)
+                              const Center(child: Text("No restaurants found")),
+                          ],
                         ),
-                      ),
-                    ),
-                  ],
+            ),
+            _buildLocationBar(),
+          ],
+        ),
+      ),
+      bottomNavigationBar: _buildBottomNav(),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 10, 16, 5),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // Replace the Column/Text with your Image
+          Image.asset(
+            'assets/lo.png', // Path to your png
+            height: 30, // Adjust height to match the design
+            fit: BoxFit.contain,
+            // If the image fails to load during development, show a fallback
+            errorBuilder: (context, error, stackTrace) {
+              return const Text(
+                "SELFX",
+                style: TextStyle(
+                  color: Color(0xFFCC0000),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 32,
+                ),
+              );
+            },
+          ),
+          const CircleAvatar(
+            backgroundColor: Color.fromARGB(255, 168, 159, 159),
+            child: Icon(Icons.person_outline,
+                color: Color.fromARGB(255, 104, 10, 10)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchBox() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              height: 50,
+              decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade200)),
+              child: TextField(
+                controller: controller,
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  hintText: "Search restaurant, cuisine or dish...",
+                  prefixIcon: Icon(Icons.search, color: Colors.grey[400]),
+                  border: InputBorder.none,
                 ),
               ),
             ),
           ),
-          if (loading)
-            Positioned.fill(
-              child: ColoredBox(
-                color: Colors.black.withOpacity(0.18),
-                child: const Center(
-                  child: Card(
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 20,
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SizedBox(
-                            width: 56,
-                            height: 56,
-                            child: Stack(
-                              alignment: Alignment.center,
-                              children: const [
-                                CircularProgressIndicator(
-                                  strokeWidth: 3,
-                                  color: Color(0xFF9F342C),
-                                ),
-                                Icon(
-                                  Icons.restaurant_menu_rounded,
-                                  size: 24,
-                                  color: Color(0xFF9F342C),
-                                ),
-                              ],
-                            ),
-                          ),
-                          SizedBox(height: 12),
-                          Text("Opening menu..."),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+          const SizedBox(width: 10),
+          Container(
+            height: 50,
+            width: 50,
+            decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.shade200)),
+            child: const Icon(Icons.tune_rounded),
+          )
         ],
       ),
+    );
+  }
+
+  Widget _buildCategories() {
+    final cats = ["All Restaurants", "Fast Food", "Cafe", "Beverages"];
+    return SizedBox(
+      height: 45,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        itemCount: cats.length,
+        itemBuilder: (context, index) {
+          bool sel = _selectedCategoryIndex == index;
+          return GestureDetector(
+            onTap: () => setState(() => _selectedCategoryIndex = index),
+            child: Container(
+              margin: const EdgeInsets.only(right: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: sel ? const Color(0xFF8B1A1A) : Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                    color: sel ? Colors.transparent : Colors.grey.shade200),
+              ),
+              child: Center(
+                  child: Text(cats[index],
+                      style: TextStyle(
+                          color: sel ? Colors.white : Colors.black87,
+                          fontWeight:
+                              sel ? FontWeight.bold : FontWeight.normal))),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildPromoBanner() {
+    return Container(
+      margin: const EdgeInsets.only(top: 15),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+          color: const Color(0xFFFFF9F7),
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: const Color(0xFFFEECE6))),
+      child: Row(
+        children: [
+          const Icon(Icons.stars, color: Colors.orange, size: 30),
+          const SizedBox(width: 12),
+          const Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                Text("Student Exclusive Offers",
+                    style:
+                        TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                Text("Save more with amazing deals!",
+                    style: TextStyle(color: Colors.grey, fontSize: 12)),
+              ])),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+                color: Colors.orange, borderRadius: BorderRadius.circular(8)),
+            child: const Text("View Offers",
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold)),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRestaurantTile(Map<String, dynamic> r) {
+    final String name = r["name"]?.toString() ?? "Restaurant";
+    return GestureDetector(
+      onTap: () => _openRestaurantMenu(r),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(15),
+            border: Border.all(color: Colors.grey.shade100)),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                  width: 70,
+                  height: 70,
+                  child: AppNetworkImage(
+                      url: r["logo_url"] ?? "",
+                      fit: BoxFit.cover,
+                      fallback:
+                          const Icon(Icons.restaurant, color: Colors.red))),
+            ),
+            const SizedBox(width: 15),
+            Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  Text(name,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 17)),
+                  const Text("Multi Cuisine • 30-40 mins",
+                      style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  const SizedBox(height: 5),
+                  Row(children: [
+                    const Icon(Icons.star, color: Colors.green, size: 14),
+                    const Text(" 4.5",
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                    Text(" • Free delivery on ₹149+",
+                        style:
+                            TextStyle(color: Colors.grey[600], fontSize: 11)),
+                  ]),
+                ])),
+            const CircleAvatar(
+                radius: 15,
+                backgroundColor: Color(0xFFFBE9E7),
+                child: Icon(Icons.chevron_right, color: Colors.red, size: 18)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLocationBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: Colors.grey.shade100))),
+      child: Row(
+        children: [
+          const Icon(Icons.location_on, color: Colors.red),
+          const SizedBox(width: 8),
+          const Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                Text("Delivering to",
+                    style: TextStyle(color: Colors.grey, fontSize: 10)),
+                Text("Campus Area",
+                    style:
+                        TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+              ])),
+          OutlinedButton(
+              onPressed: () {},
+              style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Colors.red),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8))),
+              child: const Text("Change Location",
+                  style: TextStyle(color: Colors.red, fontSize: 12))),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBottomNav() {
+    return BottomNavigationBar(
+      type: BottomNavigationBarType.fixed,
+      selectedItemColor: Colors.red,
+      currentIndex: 0,
+      items: const [
+        BottomNavigationBarItem(icon: Icon(Icons.home), label: "Home"),
+        BottomNavigationBarItem(
+            icon: Icon(Icons.receipt_long), label: "Orders"),
+        BottomNavigationBarItem(icon: Icon(Icons.local_offer), label: "Offers"),
+        BottomNavigationBarItem(icon: Icon(Icons.person), label: "Account"),
+      ],
     );
   }
 }

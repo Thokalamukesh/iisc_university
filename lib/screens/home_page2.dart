@@ -3,14 +3,18 @@ import 'dart:convert';
 
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
+import 'package:api_selfxo_project/core/device_layout.dart';
 import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:api_selfxo_project/core/local_image_asset.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/core/menu_sync.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'dart:io' show Platform;
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/modules/product_model.dart';
 import 'package:api_selfxo_project/widget/app_network_image.dart';
@@ -58,15 +62,27 @@ class HomePage2 extends StatefulWidget {
   State<HomePage2> createState() => _HomePage2State();
 }
 
-class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
+class _HomePage2State extends State<HomePage2>
+    with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
+  static const Color _menuAshBackground = Color(0xFFF3F4F6);
+  static const Color _leftCategoryAsh = Color(0xFFEDEFF2);
+  static const Color _leftCategoryTile = Color(0xFFF8F9FB);
+
   final Map<int, List<Map<String, dynamic>>> variationsMap = {};
   final Map<int, List<Map<String, dynamic>>> modifiersMap = {};
   Rect? _lastCartIconRect;
+  bool _cartIconRectSyncScheduled = false;
+  DateTime _lastCartIconRectSyncAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _cartIconRectSyncMinGap = Duration(milliseconds: 220);
   List<dynamic> _rawProducts = [];
   final Map<int, Map<String, dynamic>> _productOverrides = {};
   static const String _overridesKey = "admin_product_overrides";
   static const String _categoryOverridesKey = "admin_category_overrides";
   final Map<int, Map<String, dynamic>> _categoryOverrides = {};
+  final Map<String, List<ProductModel>> _productsByCategory = {};
+  List<ProductModel> _visibleProducts = const [];
+  List<_CategorySectionData> _visibleSections = const [];
+  Timer? _searchDebounceTimer;
 
   String? _extractBackendErrorMessage(Object error) {
     if (error is DioException) {
@@ -84,6 +100,22 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     return null;
   }
 
+  ScrollPhysics _getOptimizedScrollPhysics() {
+    // Use platform-specific physics for better performance
+    if (kIsWeb) {
+      return const BouncingScrollPhysics(
+        parent: AlwaysScrollableScrollPhysics(),
+      );
+    }
+    if (Platform.isIOS) {
+      return const BouncingScrollPhysics(
+        parent: AlwaysScrollableScrollPhysics(),
+      );
+    }
+    // Android uses ClampingScrollPhysics by default which is more performant
+    return const ClampingScrollPhysics();
+  }
+
   bool _isNetworkError(Object error) {
     if (error is! DioException) return false;
     return error.type == DioExceptionType.connectionError ||
@@ -93,7 +125,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   }
 
   Future<void> _goToAdminDashboard(BuildContext context) async {
-    if (kIsWeb) {
+    if (kIsWeb || !isTabletContext(context)) {
       if (!mounted) return;
       widget.onRestart();
       return;
@@ -114,6 +146,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   int selectedIndex = 0;
   int _activeCategoryIndex = 0;
   String searchQuery = "";
+  bool _searchHasText = false;
+  String _selectedRestaurantName = "Restaurant";
 
   final TextEditingController searchCtrl = TextEditingController();
   final ScrollController scrollCtrl = ScrollController();
@@ -146,6 +180,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    _loadSelectedRestaurantName();
     _loadProducts();
     _menuSyncListener = () {
       if (!mounted) return;
@@ -253,6 +288,13 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     );
   }
 
+  Future<void> _loadSelectedRestaurantName() async {
+    final prefs = await SharedPreferences.getInstance();
+    final name = prefs.getString("restaurant_name")?.trim() ?? "";
+    if (!mounted || name.isEmpty) return;
+    setState(() => _selectedRestaurantName = name);
+  }
+
   @override
   void dispose() {
     widget.onCartIconRect(null);
@@ -291,6 +333,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     }
     _retryTimer?.cancel();
     _categorySyncTimer?.cancel();
+    _searchDebounceTimer?.cancel();
     if (_menuSyncListener != null) {
       MenuSync.revision.removeListener(_menuSyncListener!);
     }
@@ -301,6 +344,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   void deactivate() {
     _retryTimer?.cancel();
     _categorySyncTimer?.cancel();
+    _searchDebounceTimer?.cancel();
     if (_cartBounceController.isAnimating) {
       _cartBounceController.stop(canceled: true);
     }
@@ -355,6 +399,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   Future<void> _loadProducts() async {
     if (_loadingProducts) return;
     _loadingProducts = true;
+    final totalTimer = Stopwatch()..start();
     _retryTimer?.cancel();
     if (mounted) {
       setState(() {
@@ -363,18 +408,39 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       });
     }
     try {
+      final overrideTimer = Stopwatch()..start();
       await _loadProductOverrides();
       await _loadCategoryOverrides();
-      final res = await KioskApi().getProducts();
+      overrideTimer.stop();
+      kioskLog(
+        "product override load duration=${overrideTimer.elapsedMilliseconds}ms",
+        tag: "MENU_TIMING",
+      );
 
+      final apiTimer = Stopwatch()..start();
+      final res = await KioskApi().getProducts();
+      apiTimer.stop();
+      kioskLog(
+        "getProducts API duration=${apiTimer.elapsedMilliseconds}ms",
+        tag: "MENU_TIMING",
+      );
+
+      final parseTimer = Stopwatch()..start();
       final List raw = _cloneRawProducts(res.data["products"] ?? []);
       _applyOverridesToRawProducts(raw);
       _rawProducts = raw;
       widget.onProductsLoaded(raw);
 
       final parsed = await compute(_parseProductsIsolate, raw);
+      parseTimer.stop();
+      kioskLog(
+        "product parsing duration=${parseTimer.elapsedMilliseconds}ms "
+        "count=${raw.length}",
+        tag: "MENU_TIMING",
+      );
       if (!mounted) return;
 
+      final modelTimer = Stopwatch()..start();
       final productMaps = List<Map<String, dynamic>>.from(
         parsed["products"] ?? const [],
       );
@@ -437,6 +503,12 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
             ),
           )..removeWhere((key, value) => key == 0),
         );
+      modelTimer.stop();
+      kioskLog(
+        "product model build duration=${modelTimer.elapsedMilliseconds}ms "
+        "products=${tempProducts.length} categories=${tempCategories.length}",
+        tag: "MENU_TIMING",
+      );
 
       // 2. Update UI with data
       if (!mounted) return;
@@ -454,7 +526,15 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         if (_activeCategoryIndex >= categories.length) {
           _activeCategoryIndex = 0;
         }
+        _searchHasText = searchCtrl.text.trim().isNotEmpty;
+        _rebuildProductIndexCache();
+        _rebuildVisibleCollections();
       });
+      totalTimer.stop();
+      kioskLog(
+        "menu ready total duration=${totalTimer.elapsedMilliseconds}ms",
+        tag: "MENU_TIMING",
+      );
 
       // 3. 🔥 THE KEY UPDATE: Check for scrollability AFTER rendering
       // We use a post-frame callback to let Flutter finish building the list
@@ -518,11 +598,11 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     if (!mounted) return;
     if (kIsWeb) return;
     final context = this.context;
-    final int maxItems = 24;
+    const int maxItems = 12;
     final productsToCache = allProducts.take(maxItems);
     for (final p in productsToCache) {
       final url = p.image.trim();
-      if (url.isNotEmpty) {
+      if (_shouldPrecacheRasterUrl(url)) {
         precacheImage(
           NetworkImage(url),
           context,
@@ -532,9 +612,9 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     }
     int cached = 0;
     for (final url in categoryImages.values) {
-      if (cached >= 8) break;
+      if (cached >= 4) break;
       final u = url.trim();
-      if (u.isEmpty) continue;
+      if (!_shouldPrecacheRasterUrl(u)) continue;
       precacheImage(
         NetworkImage(u),
         context,
@@ -542,6 +622,14 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       );
       cached++;
     }
+  }
+
+  bool _shouldPrecacheRasterUrl(String url) {
+    if (url.isEmpty) return false;
+    if (url.startsWith('data:')) return false;
+    if (localImageAssetForUrl(url)?.isSvg ?? false) return false;
+    final normalized = url.split('?').first.split('#').first.toLowerCase();
+    return !normalized.endsWith('.svg');
   }
 
   void _onProductScroll() {
@@ -586,7 +674,6 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       final render = ctx.findRenderObject();
       if (render == null || !render.attached) continue;
       final viewport = RenderAbstractViewport.of(render);
-      if (viewport == null) continue;
 
       final offset = viewport.getOffsetToReveal(render, 0).offset;
       firstOffset ??= offset;
@@ -597,7 +684,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       }
     }
 
-    if (firstOffset != null && currentOffset < (firstOffset! - 8)) {
+    if (firstOffset != null && currentOffset < (firstOffset - 8)) {
       bestIndex = 0;
     }
 
@@ -665,9 +752,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         ..clear()
         ..addAll(
           decoded.map((k, v) {
-            final override = v is Map
-                ? Map<String, dynamic>.from(v as Map)
-                : <String, dynamic>{};
+            final override =
+                v is Map ? Map<String, dynamic>.from(v) : <String, dynamic>{};
             final normalizedCategory = _categoryLabel(
               override["category_name"] ?? override["category"],
               fallback: "",
@@ -699,9 +785,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
           decoded.map(
             (k, v) => MapEntry(
               int.tryParse(k.toString()) ?? 0,
-              v is Map
-                  ? Map<String, dynamic>.from(v as Map)
-                  : <String, dynamic>{},
+              v is Map ? Map<String, dynamic>.from(v) : <String, dynamic>{},
             ),
           )..removeWhere((key, value) => key == 0),
         );
@@ -784,9 +868,6 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         for (final item in items) {
           if (item is! Map) continue;
           final itemMap = Map<String, dynamic>.from(item);
-          final nested = itemMap["item"];
-          final nestedMap =
-              nested is Map ? Map<String, dynamic>.from(nested) : null;
           final itemId = _resolveItemId(itemMap);
           if (itemId == 0) continue;
           final override = _productOverrides[itemId];
@@ -875,13 +956,110 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     return categories.where((c) => c != "All").toList();
   }
 
-  List<ProductModel> _filterProductsForCategory(String? category) {
-    return allProducts.where((p) {
-      final matchesCategory = category == null || p.category == category;
-      if (!matchesCategory) return false;
-      if (searchQuery.isEmpty) return true;
-      return p.name.toLowerCase().contains(searchQuery);
-    }).toList();
+  void _rebuildProductIndexCache() {
+    _productsByCategory.clear();
+    for (final product in allProducts) {
+      (_productsByCategory[product.category] ??= <ProductModel>[]).add(product);
+    }
+  }
+
+  List<ProductModel> _filterProductsForCategory(
+    String? category, {
+    String? queryOverride,
+  }) {
+    final source = category == null
+        ? allProducts
+        : (_productsByCategory[category] ?? const <ProductModel>[]);
+    final query = (queryOverride ?? searchQuery).trim().toLowerCase();
+    if (query.isEmpty) {
+      return List<ProductModel>.from(source, growable: false);
+    }
+    return source
+        .where((p) => p.name.toLowerCase().contains(query))
+        .toList(growable: false);
+  }
+
+  void _rebuildVisibleCollections() {
+    if (categories.isEmpty) {
+      _visibleProducts = const [];
+      _visibleSections = const [];
+      _rightCategoryContexts.clear();
+      return;
+    }
+
+    final query = searchQuery.trim().toLowerCase();
+    final sectionMode = selectedIndex == 0;
+
+    if (!sectionMode) {
+      final selectedCategory = categories[selectedIndex];
+      _visibleProducts = _filterProductsForCategory(
+        selectedCategory,
+        queryOverride: query,
+      );
+      _visibleSections = const [];
+      _rightCategoryContexts.clear();
+      return;
+    }
+
+    final sections = <_CategorySectionData>[];
+    for (final category in _sectionCategories()) {
+      final items = _filterProductsForCategory(category, queryOverride: query);
+      if (items.isEmpty) continue;
+      sections.add(_CategorySectionData(category: category, items: items));
+    }
+    _visibleSections = sections;
+
+    final visibleCategories = sections.map((e) => e.category).toSet();
+    _rightCategoryContexts.removeWhere(
+      (category, _) => !visibleCategories.contains(category),
+    );
+
+    if (query.isEmpty) {
+      _visibleProducts = List<ProductModel>.from(allProducts, growable: false);
+      return;
+    }
+    _visibleProducts =
+        sections.expand((section) => section.items).toList(growable: false);
+  }
+
+  void _onSearchChanged(String value) {
+    final hasText = value.trim().isNotEmpty;
+    if (_searchHasText != hasText && mounted) {
+      setState(() {
+        _searchHasText = hasText;
+      });
+    }
+    _searchDebounceTimer?.cancel();
+    final normalized = value.toLowerCase();
+    _searchDebounceTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted) return;
+      if (searchQuery == normalized) return;
+      setState(() {
+        searchQuery = normalized;
+        _rebuildVisibleCollections();
+      });
+    });
+  }
+
+  void _scheduleCartIconRectSync(BuildContext ctx) {
+    if (_cartIconRectSyncScheduled) return;
+    final now = DateTime.now();
+    if (now.difference(_lastCartIconRectSyncAt) < _cartIconRectSyncMinGap) {
+      return;
+    }
+    _lastCartIconRectSyncAt = now;
+    _cartIconRectSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _cartIconRectSyncScheduled = false;
+      if (!mounted) return;
+      final render = ctx.findRenderObject();
+      if (render is! RenderBox || !render.attached) return;
+      final rect = render.localToGlobal(Offset.zero) & render.size;
+      if (rect != _lastCartIconRect) {
+        _lastCartIconRect = rect;
+        widget.onCartIconRect(rect);
+      }
+    });
   }
 
   bool _debugIsTruthy(dynamic value) {
@@ -914,6 +1092,17 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
 
   String _debugNormKey(String k) =>
       k.toLowerCase().replaceAll(RegExp(r"[^a-z0-9]"), "");
+
+  double _leftCategoryBarWidthFor({
+    required double width,
+    required bool isTablet,
+    required bool isWebMobile,
+  }) {
+    if (isTablet) return 154;
+    final minWidth = isWebMobile ? 86.0 : 78.0;
+    final maxWidth = isWebMobile ? 96.0 : 92.0;
+    return (width * 0.23).clamp(minWidth, maxWidth).toDouble();
+  }
 
   dynamic _debugReadKey(Map? item, List<String> keys) {
     if (item == null) return null;
@@ -988,7 +1177,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: const Color.fromARGB(255, 255, 255, 255),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -1065,49 +1254,17 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   }
 
   @override
+  bool get wantKeepAlive => true;
+
+  @override
   Widget build(BuildContext context) {
+    super.build(context);
     if (isLoading) {
-      return Scaffold(
-        backgroundColor: Colors.white,
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(
-                width: 74,
-                height: 74,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: const [
-                    CircularProgressIndicator(
-                      strokeWidth: 3.2,
-                      color: Color(0xFF9F342C),
-                    ),
-                    Icon(
-                      Icons.restaurant_menu_rounded,
-                      size: 32,
-                      color: Color(0xFF9F342C),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                "Preparing menu...",
-                style: TextStyle(
-                  color: Color(0xFF6E6E6E),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
+      return _buildMenuSkeleton();
     }
     if (hasError) {
       return Scaffold(
-        backgroundColor: const Color(0xFFF7F7F7),
+        backgroundColor: _menuAshBackground,
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -1190,10 +1347,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       );
     }
 
-    final bool sectionMode = selectedIndex == 0;
-    final filtered = sectionMode
-        ? _filterProductsForCategory(null)
-        : _filterProductsForCategory(categories[selectedIndex]);
+    final filtered = _visibleProducts;
 
     final width = MediaQuery.of(context).size.width;
     final bool isTablet = width > 600;
@@ -1206,14 +1360,16 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     // 🎯 FIX: We wrap the whole body in a Row so the Left Bar is independent
     // of the main content scroll and spans the full height.
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: _menuAshBackground,
       body: Stack(
         children: [
           Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // ================= LEFT BAR (FULL HEIGHT) =================
-              _buildLeftCategoryBar(),
+              RepaintBoundary(
+                child: _buildLeftCategoryBar(),
+              ),
 
               // ================= RIGHT CONTENT AREA =================
               Expanded(
@@ -1254,22 +1410,129 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildLeftCategoryBar() {
+  Widget _buildMenuSkeleton() {
     final bool isTablet = MediaQuery.of(context).size.width > 600;
+
+    Widget block({
+      required double width,
+      required double height,
+      BorderRadius? radius,
+    }) {
+      return Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: const Color(0xFFEDEDEF),
+          borderRadius: radius ?? BorderRadius.circular(12),
+        ),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: _menuAshBackground,
+      body: SafeArea(
+        child: Row(
+          children: [
+            Container(
+              width: isTablet ? 140 : 104,
+              color: _leftCategoryAsh,
+              padding: const EdgeInsets.all(14),
+              child: ListView.separated(
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: 8,
+                separatorBuilder: (_, __) => const SizedBox(height: 12),
+                itemBuilder: (_, index) => Column(
+                  children: [
+                    block(
+                        width: 56,
+                        height: 56,
+                        radius: BorderRadius.circular(18)),
+                    const SizedBox(height: 8),
+                    block(width: 70, height: 10),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    block(width: 180, height: 22),
+                    const SizedBox(height: 8),
+                    block(width: 260, height: 14),
+                    const SizedBox(height: 20),
+                    Expanded(
+                      child: GridView.builder(
+                        physics: const NeverScrollableScrollPhysics(),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: isTablet ? 3 : 2,
+                          mainAxisSpacing: 14,
+                          crossAxisSpacing: 14,
+                          childAspectRatio: 0.78,
+                        ),
+                        itemCount: isTablet ? 9 : 6,
+                        itemBuilder: (_, __) => Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: block(
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                  radius: BorderRadius.circular(16),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              block(width: double.infinity, height: 14),
+                              const SizedBox(height: 8),
+                              block(width: 90, height: 12),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLeftCategoryBar() {
+    final width = MediaQuery.of(context).size.width;
+    final bool isTablet = width > 600;
     final bool isWebMobile = kIsWeb && !isTablet;
     final double dpr = MediaQuery.of(context).devicePixelRatio;
-    final double avatarRadius = isTablet ? 26 : (isWebMobile ? 18 : 20);
-    final double tileMinHeight = isTablet ? 94 : (isWebMobile ? 82 : 74);
-    final double leftBarWidth = isTablet ? 154 : (isWebMobile ? 90 : 80);
+    final double leftBarWidth = _leftCategoryBarWidthFor(
+      width: width,
+      isTablet: isTablet,
+      isWebMobile: isWebMobile,
+    );
+    final double avatarRadius = isTablet
+        ? 26
+        : (leftBarWidth * 0.23)
+            .clamp(isWebMobile ? 18.0 : 19.0, 22.0)
+            .toDouble();
+    final double tileMinHeight = isTablet
+        ? 94
+        : (leftBarWidth * 0.9)
+            .clamp(isWebMobile ? 80.0 : 72.0, 86.0)
+            .toDouble();
 
     return Container(
       width: leftBarWidth,
       decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Color(0xFF7A211B), Color(0xFF5D1713)],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-        ),
+        color: _leftCategoryAsh,
       ),
       child: Stack(
         children: [
@@ -1291,23 +1554,31 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                           size: 22,
                         )
                       : Padding(
-                          key: const ValueKey("categories-title"),
-                          padding: EdgeInsets.symmetric(
-                            horizontal: isTablet ? 8 : 6,
-                            vertical: isTablet ? 4 : 3,
+                          key: ValueKey(
+                            "restaurant-title-$_selectedRestaurantName",
                           ),
-                          child: Text(
-                            isTablet ? "Categories" : "Category",
-                            textAlign: TextAlign.center,
-                            maxLines: 2,
-                            softWrap: true,
-                            overflow: TextOverflow.clip,
-                            style: TextStyle(
-                              color: const Color(0xFFFFE5CA),
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.4,
-                              fontSize: isTablet ? 14 : 10.8,
-                              height: 1.1,
+                          padding: EdgeInsets.fromLTRB(
+                            isTablet ? 8 : 5,
+                            isTablet ? 4 : 2,
+                            isTablet ? 8 : 5,
+                            isTablet ? 6 : 4,
+                          ),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.center,
+                            child: Text(
+                              _selectedRestaurantName,
+                              textAlign: TextAlign.center,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: const Color(0xFF9F342C),
+                                fontWeight: FontWeight.w900,
+                                fontStyle: FontStyle.italic,
+                                letterSpacing: 0.2,
+                                fontSize: isTablet ? 28 : 24,
+                                height: 1.0,
+                              ),
                             ),
                           ),
                         ),
@@ -1342,7 +1613,9 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                     selectedIndex = i;
                                     _activeCategoryIndex = i;
                                     searchQuery = "";
+                                    _searchHasText = false;
                                     searchCtrl.clear();
+                                    _rebuildVisibleCollections();
                                   });
                                   WidgetsBinding.instance.addPostFrameCallback((
                                     _,
@@ -1370,29 +1643,28 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                     gradient: selected
                                         ? const LinearGradient(
                                             colors: [
-                                              Color(0xFFFFF7EA),
-                                              Color(0xFFF4E4CC),
+                                              Color(0xFFFFFBF1),
+                                              Color(0xFFFFE2A7),
+                                              Color(0xFFF3C46D),
                                             ],
-                                            begin: Alignment.topCenter,
-                                            end: Alignment.bottomCenter,
+                                            begin: Alignment.topLeft,
+                                            end: Alignment.bottomRight,
                                           )
                                         : null,
-                                    color: selected
-                                        ? null
-                                        : Colors.white.withOpacity(0.08),
+                                    color: selected ? null : _leftCategoryTile,
                                     border: Border.all(
                                       color: selected
-                                          ? const Color(0xFFFFE5C7)
-                                          : Colors.white.withOpacity(0.16),
+                                          ? const Color(0xFFFFD98A)
+                                          : const Color(0xFFE2E5EA),
                                       width: selected ? 1.4 : 1,
                                     ),
                                     boxShadow: selected
                                         ? [
                                             BoxShadow(
-                                              color: Colors.black
-                                                  .withOpacity(0.16),
-                                              blurRadius: 14,
-                                              offset: const Offset(0, 8),
+                                              color: const Color(0xFFB8892F)
+                                                  .withOpacity(0.24),
+                                              blurRadius: 16,
+                                              offset: const Offset(0, 7),
                                             ),
                                           ]
                                         : const [],
@@ -1408,17 +1680,9 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                             width: avatarRadius * 2,
                                             height: avatarRadius * 2,
                                             child: catName == "All"
-                                                ? Image.asset(
-                                                    "assets/catall.jpg",
-                                                    fit: BoxFit.cover,
-                                                    filterQuality:
-                                                        FilterQuality.high,
-                                                    errorBuilder: (_, __,
-                                                            ___) =>
-                                                        _categoryFallbackIcon(
-                                                      isTablet: isTablet,
-                                                      selected: selected,
-                                                    ),
+                                                ? _allCategoryIcon(
+                                                    isTablet: isTablet,
+                                                    selected: selected,
                                                   )
                                                 : categoryImageUrl.isNotEmpty
                                                     ? AppNetworkImage(
@@ -1445,8 +1709,8 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                                             const Duration(milliseconds: 220),
                                         style: TextStyle(
                                           color: selected
-                                              ? const Color(0xFF512018)
-                                              : const Color(0xFFFDE9D5),
+                                              ? const Color(0xFF9F342C)
+                                              : const Color(0xFF374151),
                                           fontSize: isTablet ? 13.2 : 10.6,
                                           fontWeight: selected
                                               ? FontWeight.w800
@@ -1488,7 +1752,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
                       offset: Offset(0, 18 * _leftScrollHintController.value),
                       child: const Icon(
                         Icons.keyboard_arrow_down_rounded,
-                        color: Color.fromARGB(255, 255, 255, 255),
+                        color: Color(0xFF9CA3AF),
                         size: 68,
                       ),
                     );
@@ -1504,15 +1768,55 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
   Widget _categoryFallbackIcon({
     required bool isTablet,
     required bool selected,
+    IconData icon = Icons.fastfood_rounded,
   }) {
     return Container(
-      color: selected
-          ? const Color(0xFFF5E4CF)
-          : const Color.fromARGB(50, 255, 255, 255),
+      color: selected ? const Color(0xFFF5E4CF) : const Color(0xFFE5E7EB),
       child: Icon(
-        Icons.fastfood_rounded,
-        color: selected ? const Color(0xFF8D2B23) : Colors.white70,
+        icon,
+        color: selected ? const Color(0xFF8D2B23) : const Color(0xFF6B7280),
         size: isTablet ? 28 : 22,
+      ),
+    );
+  }
+
+  Widget _allCategoryIcon({
+    required bool isTablet,
+    required bool selected,
+  }) {
+    final squareSize = isTablet ? 8.5 : 7.0;
+    final gap = isTablet ? 5.0 : 4.0;
+    final iconColor =
+        selected ? const Color(0xFFD90012) : const Color(0xFF4B5563);
+
+    Widget square() {
+      return Container(
+        width: squareSize,
+        height: squareSize,
+        decoration: BoxDecoration(
+          color: iconColor,
+          borderRadius: BorderRadius.circular(2.5),
+        ),
+      );
+    }
+
+    return Container(
+      color: selected ? const Color(0xFFFFE8BE) : const Color(0xFFE5E7EB),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [square(), SizedBox(width: gap), square()],
+            ),
+            SizedBox(height: gap),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [square(), SizedBox(width: gap), square()],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1522,9 +1826,13 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final bool isTablet = width > 600;
     final bool isWebMobile = kIsWeb && !isTablet;
     final bool sectionMode = selectedIndex == 0;
-    final double leftBarWidth = isTablet ? 154 : (isWebMobile ? 90 : 80);
+    final double leftBarWidth = _leftCategoryBarWidthFor(
+      width: width,
+      isTablet: isTablet,
+      isWebMobile: isWebMobile,
+    );
     final double rightAreaWidth = (width - leftBarWidth).clamp(320.0, width);
-    final double gridPadding = 24; // SliverPadding left + right
+    const double gridPadding = 24; // SliverPadding left + right
     final double crossAxisSpacing = isTablet ? 17 : 12;
     final double gridWidth = (rightAreaWidth - gridPadding).clamp(200.0, width);
     final double itemWidth =
@@ -1538,89 +1846,98 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
         widget.showBottomBar ? _bottomBarBaseHeight(isTablet) : 0;
     final double bottomSpace =
         bottomBarHeight + (widget.showBottomBar ? bottomInset : 0) + 16;
-    return Column(
-      children: [
-        Padding(padding: const EdgeInsets.all(12), child: _buildSearchRow()),
-        Expanded(
-          child: Stack(
-            children: [
-              Column(
-                children: [
-                  Expanded(
-                    child: ScrollConfiguration(
-                      behavior: ScrollConfiguration.of(
-                        context,
-                      ).copyWith(overscroll: false),
-                      child: CustomScrollView(
-                        controller: scrollCtrl,
-                        physics: const ClampingScrollPhysics(),
-                        slivers: [
-                          SliverToBoxAdapter(
-                            child: BestSellingWidget(
-                              products: allProducts,
-                              isActive: widget.isActive,
-                              onAddToCart: widget.onAddToCart,
-                            ),
-                          ),
-                          const SliverToBoxAdapter(child: SizedBox(height: 8)),
-                          if (sectionMode)
-                            ..._buildCategorySections(
-                              gridCount,
-                              isTablet,
-                              imageCacheWidth: imageCacheWidth,
-                              imageCacheHeight: imageCacheHeight,
-                              showHeaders: true,
-                            )
-                          else
-                            SliverPadding(
-                              padding: const EdgeInsets.all(12),
-                              sliver: SliverGrid(
-                                delegate: SliverChildBuilderDelegate((
-                                  context,
-                                  i,
-                                ) {
-                                  final p = filtered[i];
-                                  return ProductCardRef(
-                                    id: p.id,
-                                    name: p.name,
-                                    category: p.category,
-                                    price: p.price,
-                                    imagePath: p.image,
-                                    isVeg: p.isVeg,
-                                    qty: widget.getQtyForProduct(p.id),
-                                    onAddToCart: widget.onAddToCart,
-                                    imageCacheWidth: imageCacheWidth,
-                                    imageCacheHeight: imageCacheHeight,
-                                    variations: variationsMap[p.id] ?? [],
-                                    modifiers: modifiersMap[p.id] ?? [],
-                                  );
-                                }, childCount: filtered.length),
-                                gridDelegate:
-                                    SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: gridCount,
-                                  mainAxisSpacing: 12,
-                                  crossAxisSpacing: isTablet ? 17 : 12,
-                                  childAspectRatio: isTablet ? 0.69 : 0.62,
+    return ColoredBox(
+      color: _menuAshBackground,
+      child: Column(
+        children: [
+          Padding(padding: const EdgeInsets.all(12), child: _buildSearchRow()),
+          Expanded(
+            child: Stack(
+              children: [
+                Column(
+                  children: [
+                    Expanded(
+                      child: ScrollConfiguration(
+                        behavior: ScrollConfiguration.of(
+                          context,
+                        ).copyWith(overscroll: false),
+                        child: CustomScrollView(
+                          controller: scrollCtrl,
+                          physics: _getOptimizedScrollPhysics(),
+                          cacheExtent: 600,
+                          slivers: [
+                            SliverToBoxAdapter(
+                              child: RepaintBoundary(
+                                child: BestSellingWidget(
+                                  products: allProducts,
+                                  isActive: widget.isActive,
+                                  onAddToCart: widget.onAddToCart,
                                 ),
                               ),
                             ),
-                          SliverToBoxAdapter(
-                            child: SizedBox(height: bottomSpace),
-                          ),
-                        ],
+                            const SliverToBoxAdapter(
+                              child: SizedBox(height: 8),
+                            ),
+                            if (sectionMode)
+                              ..._buildCategorySections(
+                                gridCount,
+                                isTablet,
+                                imageCacheWidth: imageCacheWidth,
+                                imageCacheHeight: imageCacheHeight,
+                                showHeaders: true,
+                              )
+                            else
+                              SliverPadding(
+                                padding: const EdgeInsets.all(12),
+                                sliver: SliverGrid(
+                                  delegate: SliverChildBuilderDelegate((
+                                    context,
+                                    i,
+                                  ) {
+                                    final p = filtered[i];
+                                    return ProductCardRef(
+                                      id: p.id,
+                                      name: p.name,
+                                      category: p.category,
+                                      price: p.price,
+                                      imagePath: p.image,
+                                      isVeg: p.isVeg,
+                                      qty: widget.getQtyForProduct(p.id),
+                                      onAddToCart: widget.onAddToCart,
+                                      imageCacheWidth: imageCacheWidth,
+                                      imageCacheHeight: imageCacheHeight,
+                                      variations: variationsMap[p.id] ?? [],
+                                      modifiers: modifiersMap[p.id] ?? [],
+                                    );
+                                  }, childCount: filtered.length),
+                                  gridDelegate:
+                                      SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: gridCount,
+                                    mainAxisSpacing: 12,
+                                    crossAxisSpacing: isTablet ? 17 : 12,
+                                    childAspectRatio: isTablet ? 0.69 : 0.62,
+                                  ),
+                                ),
+                              ),
+                            SliverToBoxAdapter(
+                              child: SizedBox(height: bottomSpace),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  if (_showProductScrollHint && filtered.length > gridCount * 2)
-                    const SizedBox.shrink(),
-                ],
-              ),
-              if (widget.showBottomBar)
-                Align(alignment: Alignment.bottomCenter, child: _bottomBar()),
-            ],
+                    if (_showProductScrollHint &&
+                        filtered.length > gridCount * 2)
+                      const SizedBox.shrink(),
+                  ],
+                ),
+                if (widget.showBottomBar)
+                  Align(alignment: Alignment.bottomCenter, child: _bottomBar()),
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -1632,29 +1949,31 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     required bool showHeaders,
   }) {
     final List<Widget> slivers = [];
-    for (final cat in _sectionCategories()) {
-      final items = _filterProductsForCategory(cat);
-      if (items.isEmpty) continue;
+    for (final section in _visibleSections) {
+      final cat = section.category;
+      final items = section.items;
 
       if (showHeaders) {
         slivers.add(
           SliverToBoxAdapter(
-            child: Builder(
-              builder: (ctx) {
-                _rightCategoryContexts[cat] = ctx;
-                return Container(
-                  key: ValueKey("cat-header-$cat"),
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                  child: Text(
-                    cat,
-                    style: TextStyle(
-                      fontSize: isTablet ? 22 : 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
+            child: RepaintBoundary(
+              child: Builder(
+                builder: (ctx) {
+                  _rightCategoryContexts[cat] = ctx;
+                  return Container(
+                    key: ValueKey("cat-header-$cat"),
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                    child: Text(
+                      cat,
+                      style: TextStyle(
+                        fontSize: isTablet ? 22 : 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87,
+                      ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
           ),
         );
@@ -1734,7 +2053,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     final int totalPrice = _totalPrice();
 
     const Color accentOrange = Color(0xFF9F342C);
-    final Color cartGreen = const Color.fromARGB(255, 65, 159, 44);
+    const Color cartGreen = Color.fromARGB(255, 65, 159, 44);
 
     return SizedBox(
       height: baseHeight + bottomInset,
@@ -1960,17 +2279,7 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
               child: Builder(
                 builder: (ctx) {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (!mounted) return;
-                    final render = ctx.findRenderObject();
-                    if (render is! RenderBox || !render.attached) {
-                      return;
-                    }
-                    final rect =
-                        render.localToGlobal(Offset.zero) & render.size;
-                    if (rect != _lastCartIconRect) {
-                      _lastCartIconRect = rect;
-                      widget.onCartIconRect(rect);
-                    }
+                    _scheduleCartIconRectSync(ctx);
                   });
                   return Icon(
                     Icons.shopping_cart,
@@ -2069,69 +2378,6 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildNoNetworkIndicator() {
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.92),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withOpacity(0.6)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.2),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: Colors.red.withOpacity(0.12),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.wifi_off_rounded,
-                color: Colors.redAccent,
-                size: 18,
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "No INTERNET",
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 0.8,
-                    color: Colors.black87,
-                  ),
-                ),
-                SizedBox(height: 2),
-                Text(
-                  "Offline",
-                  style: TextStyle(
-                    color: Colors.black54,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 10,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildSearchRow() {
     final bool isTablet = MediaQuery.of(context).size.width > 600;
     return Row(
@@ -2147,23 +2393,28 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
             child: TextField(
               controller: searchCtrl,
               textInputAction: TextInputAction.search,
-              onChanged: (v) => setState(() => searchQuery = v.toLowerCase()),
+              onChanged: _onSearchChanged,
               decoration: InputDecoration(
                 border: InputBorder.none,
                 prefixIcon: const Icon(Icons.search, size: 22),
-                hintText: "Search menu items...",
+                hintText: "SEARCH MENU ITEMS",
                 hintStyle: const TextStyle(
                   fontSize: 14,
-                  color: Color(0xFF8B8F96),
+                  color: Color.fromARGB(255, 36, 36, 36),
                 ),
                 contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                suffixIcon: searchCtrl.text.isEmpty
+                suffixIcon: !_searchHasText
                     ? null
                     : IconButton(
                         icon: const Icon(Icons.close_rounded),
                         onPressed: () {
+                          _searchDebounceTimer?.cancel();
                           searchCtrl.clear();
-                          setState(() => searchQuery = "");
+                          setState(() {
+                            searchQuery = "";
+                            _searchHasText = false;
+                            _rebuildVisibleCollections();
+                          });
                         },
                       ),
               ),
@@ -2328,6 +2579,16 @@ class _HomePage2State extends State<HomePage2> with TickerProviderStateMixin {
       ),
     );
   }
+}
+
+class _CategorySectionData {
+  final String category;
+  final List<ProductModel> items;
+
+  const _CategorySectionData({
+    required this.category,
+    required this.items,
+  });
 }
 
 Map<String, dynamic> _parseProductsIsolate(List<dynamic> raw) {

@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 
 class ProductsTab extends StatefulWidget {
   final VoidCallback onProductsUpdated;
@@ -2093,12 +2094,12 @@ class _ProductsTabState extends State<ProductsTab> {
                               final cacheHeight = (constraints.maxHeight * dpr)
                                   .round()
                                   .clamp(1, 4096);
-                              return Image.network(
-                                imageUrl,
+                              return AppNetworkImage(
+                                url: imageUrl,
                                 fit: BoxFit.cover,
                                 cacheWidth: cacheWidth,
                                 cacheHeight: cacheHeight,
-                                errorBuilder: (_, __, ___) => Container(
+                                fallback: Container(
                                   color: Colors.grey[100],
                                   child: const Icon(
                                     Icons.dining_sharp,

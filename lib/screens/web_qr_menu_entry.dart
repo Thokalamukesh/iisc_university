@@ -6,18 +6,19 @@ import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/screens/register_screen.dart';
 import 'package:api_selfxo_project/services/auth_service.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class WebQrMenuEntryScreen extends StatefulWidget {
   final String restaurantId;
   final String? requestedOrderType;
+  final Map<String, dynamic>? initialRestaurant;
 
   const WebQrMenuEntryScreen({
     super.key,
     required this.restaurantId,
     this.requestedOrderType,
+    this.initialRestaurant,
   });
 
   @override
@@ -26,6 +27,8 @@ class WebQrMenuEntryScreen extends StatefulWidget {
 
 class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
   bool _loading = true;
+  bool _bootstrapping = false;
+  bool _navigated = false;
   String? _errorMessage;
 
   String _normalizedKey(String raw) =>
@@ -72,36 +75,14 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
     return null;
   }
 
-  bool _restaurantMatchesSelection({
-    required Map<String, dynamic>? restaurant,
-    required String selectedId,
-    required String? selectedHash,
-  }) {
-    final rid = _normalizedKey(_restaurantMapId(restaurant) ?? "");
-    final rhash = _normalizedKey(_restaurantMapHash(restaurant) ?? "");
-    final sid = _normalizedKey(selectedId);
-    final shash = _normalizedKey(selectedHash ?? "");
-
-    if (rid.isEmpty && rhash.isEmpty) return true;
-    if (sid.isNotEmpty && (sid == rid || sid == rhash)) return true;
-    if (shash.isNotEmpty && (shash == rid || shash == rhash)) return true;
-    return false;
+  String? _restaurantMapName(Map<String, dynamic>? restaurant) {
+    if (restaurant == null) return null;
+    final v = restaurant["name"]?.toString().trim();
+    if (v != null && v.isNotEmpty) return v;
+    return null;
   }
 
   String _extractErrorMessage(Object error) {
-    if (error is DioException) {
-      final data = error.response?.data;
-      if (data is Map) {
-        final message = data["message"] ?? data["error"] ?? data["errors"];
-        if (message != null && message.toString().trim().isNotEmpty) {
-          return message.toString().trim();
-        }
-      }
-      if (error.message != null && error.message!.trim().isNotEmpty) {
-        return error.message!.trim();
-      }
-    }
-
     final raw = error.toString().replaceFirst("Exception: ", "").trim();
     if (raw.isEmpty) {
       return "This restaurant menu could not be opened.";
@@ -116,6 +97,10 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
   }
 
   Future<void> _bootstrapFromQr() async {
+    if (_bootstrapping || _navigated) return;
+    _bootstrapping = true;
+    final navigationTimer = Stopwatch()..start();
+
     setState(() {
       _loading = true;
       _errorMessage = null;
@@ -132,20 +117,29 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
       String? resolvedRestaurantHash;
       String? resolvedRestaurantName;
 
-      try {
-        final restaurants = await KioskApi()
-            .getAllRestaurantsWeb()
-            .timeout(const Duration(seconds: 8));
-        final matched = _resolveRestaurantIdentityFromList(
-          resolvedRestaurantId,
-          restaurants,
-        );
-        if (matched != null) {
-          resolvedRestaurantId = matched.id.trim();
-          resolvedRestaurantHash = matched.hash?.trim();
-          resolvedRestaurantName = matched.name?.trim();
-        }
-      } catch (_) {}
+      final selectedRestaurant = widget.initialRestaurant;
+      if (selectedRestaurant != null) {
+        final selectedId = _restaurantMapId(selectedRestaurant);
+        final selectedHash = _restaurantMapHash(selectedRestaurant);
+        final selectedName = _restaurantMapName(selectedRestaurant);
+        resolvedRestaurantId =
+            selectedId ?? selectedHash ?? resolvedRestaurantId;
+        resolvedRestaurantHash = selectedHash;
+        resolvedRestaurantName = selectedName;
+      } else {
+        try {
+          final restaurants = await KioskApi().getAllRestaurantsWeb();
+          final matched = _resolveRestaurantIdentityFromList(
+            resolvedRestaurantId,
+            restaurants,
+          );
+          if (matched != null) {
+            resolvedRestaurantId = matched.id.trim();
+            resolvedRestaurantHash = matched.hash?.trim();
+            resolvedRestaurantName = matched.name?.trim();
+          }
+        } catch (_) {}
+      }
 
       final currentRestaurantKey =
           resolvedRestaurantHash?.trim().isNotEmpty == true
@@ -179,57 +173,32 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
         tag: 'WEB_BOOTSTRAP',
       );
 
+      final authTimer = Stopwatch()..start();
       final ok = await AuthService().initializeKiosk(force: restaurantChanged);
+      authTimer.stop();
+      kioskLog(
+        'initializeKiosk completed ok=$ok '
+        'duration=${authTimer.elapsedMilliseconds}ms',
+        tag: 'WEB_BOOTSTRAP',
+      );
       if (!ok) {
         throw Exception("Unable to initialize this restaurant on web.");
       }
 
-      Map<String, dynamic>? restaurant;
-      Map<String, dynamic>? kioskSettings;
-      try {
-        Response res = await KioskApi()
-            .getRestaurantData()
-            .timeout(const Duration(seconds: 4));
-        var bundle = _extractRestaurantBundle(res.data);
-        restaurant = bundle.restaurant;
-        kioskSettings = bundle.kioskSettings;
-
-        final tokenMatchesSelection = _restaurantMatchesSelection(
-          restaurant: restaurant,
-          selectedId: resolvedRestaurantId,
-          selectedHash: resolvedRestaurantHash,
-        );
-        if (!tokenMatchesSelection) {
-          kioskLog(
-            'token restaurant mismatch -> reinitializing kiosk token',
-            tag: 'WEB_BOOTSTRAP',
-          );
-          final retried = await AuthService().initializeKiosk(force: true);
-          if (retried) {
-            res = await KioskApi()
-                .getRestaurantData()
-                .timeout(const Duration(seconds: 4));
-            bundle = _extractRestaurantBundle(res.data);
-            restaurant = bundle.restaurant;
-            kioskSettings = bundle.kioskSettings;
-          }
-        }
-        await _applyRestaurantMeta(
-          prefs: prefs,
-          restaurant: restaurant,
-          kioskSettings: kioskSettings,
-        );
-      } catch (_) {
-        unawaited(_refreshRestaurantMetaInBackground());
-      }
-
       final orderType = _resolveInitialOrderType(
         requested: widget.requestedOrderType,
-        restaurant: restaurant,
-        kioskSettings: kioskSettings,
+        restaurant: null,
+        kioskSettings: null,
       );
+      unawaited(_warmMenuDataInBackground());
 
-      if (!mounted) return;
+      if (!mounted || _navigated) return;
+      _navigated = true;
+      navigationTimer.stop();
+      kioskLog(
+        'menu navigation ready duration=${navigationTimer.elapsedMilliseconds}ms',
+        tag: 'WEB_BOOTSTRAP',
+      );
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (_) => MainNavigation(orderType: orderType),
@@ -242,6 +211,8 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
         _loading = false;
       });
       return;
+    } finally {
+      _bootstrapping = false;
     }
   }
 
@@ -279,7 +250,13 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
   Future<void> _refreshRestaurantMetaInBackground() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      final timer = Stopwatch()..start();
       final res = await KioskApi().getRestaurantData();
+      timer.stop();
+      kioskLog(
+        'getRestaurantData background duration=${timer.elapsedMilliseconds}ms',
+        tag: 'WEB_BOOTSTRAP',
+      );
       final bundle = _extractRestaurantBundle(res.data);
       await _applyRestaurantMeta(
         prefs: prefs,
@@ -287,6 +264,19 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
         kioskSettings: bundle.kioskSettings,
       );
     } catch (_) {}
+  }
+
+  Future<void> _warmMenuDataInBackground() async {
+    final timer = Stopwatch()..start();
+    await Future.wait<void>([
+      _refreshRestaurantMetaInBackground(),
+      KioskApi().warmProductsCache(),
+    ]);
+    timer.stop();
+    kioskLog(
+      'background menu warmup duration=${timer.elapsedMilliseconds}ms',
+      tag: 'WEB_BOOTSTRAP',
+    );
   }
 
   String _resolveInitialOrderType({
@@ -450,12 +440,12 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return Scaffold(
+      return const Scaffold(
         backgroundColor: Colors.white,
         body: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            children: const [
+            children: [
               SizedBox(
                 width: 64,
                 height: 64,

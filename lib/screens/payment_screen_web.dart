@@ -5,8 +5,9 @@ import 'dart:html' as html;
 import 'package:api_selfxo_project/core/device_info.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
+import 'package:api_selfxo_project/screens/block_screen.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
-import 'package:api_selfxo_project/screens/register_screen.dart';
+import 'package:api_selfxo_project/services/customer_order_history_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -86,11 +87,20 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   Future<void> _preloadRestaurantData() async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedName = prefs.getString("restaurant_name")?.trim() ?? "";
+      if (savedName.isNotEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _displayRestaurantName = savedName.toUpperCase();
+        });
+        return;
+      }
+
       final res = await KioskApi().getRestaurantData();
       final restaurant = res.data["data"]?["restaurant"];
       final name = restaurant?["name"] ?? "OUR KITCHEN";
 
-      final prefs = await SharedPreferences.getInstance();
       await prefs.setString("restaurant_name", name);
 
       if (!mounted) return;
@@ -373,6 +383,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
     if (!_active || !mounted) return;
     _openedSuccessScreen = true;
+    _saveCustomerOrderHistoryInBackground();
     if (alreadyPrinted) {
       Navigator.pushReplacement(
         context,
@@ -397,6 +408,24 @@ class _PaymentScreenState extends State<PaymentScreen> {
           orderType: widget.orderType,
         ),
       ),
+    );
+  }
+
+  void _saveCustomerOrderHistoryInBackground() {
+    final orderId = _orderId;
+    if (orderId == null) return;
+
+    unawaited(
+      CustomerOrderHistoryService.instance
+          .savePaidOrder(
+            orderId: orderId,
+            restaurantName: _displayRestaurantName,
+            orderType: widget.orderType,
+            totalAmount: _payableAmount ?? widget.totalAmount.toDouble(),
+            cart: widget.cart,
+          )
+          .timeout(const Duration(seconds: 2))
+          .catchError((_) {}),
     );
   }
 
@@ -517,7 +546,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         timer.cancel();
         Navigator.pushAndRemoveUntil(
           context,
-          MaterialPageRoute(builder: (_) => const UserIdScreen()),
+          MaterialPageRoute(builder: (_) => const CustomerBlockScreen()),
           (route) => false,
         );
       } else {
@@ -724,9 +753,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                           Navigator.pushAndRemoveUntil(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => isStartAgain
-                                  ? const UserIdScreen()
-                                  : const UserIdScreen(),
+                              builder: (_) => const CustomerBlockScreen(),
                             ),
                             (route) => false,
                           );
@@ -2019,7 +2046,7 @@ class _WebScanToPrintScreenState extends State<_WebScanToPrintScreen> {
     _isNavigating = true;
     Navigator.pushAndRemoveUntil(
       context,
-      MaterialPageRoute(builder: (_) => const UserIdScreen()),
+      MaterialPageRoute(builder: (_) => const CustomerBlockScreen()),
       (_) => false,
     );
   }
@@ -3192,7 +3219,7 @@ class _WebPrintReadyScreenState extends State<_WebPrintReadyScreen>
     _navigating = true;
     Navigator.pushAndRemoveUntil(
       context,
-      MaterialPageRoute(builder: (_) => const UserIdScreen()),
+      MaterialPageRoute(builder: (_) => const CustomerBlockScreen()),
       (_) => false,
     );
   }

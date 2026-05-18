@@ -6,6 +6,7 @@ import 'package:api_selfxo_project/printer/printer_s.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 import 'package:api_selfxo_project/main.dart' show rootNavigatorKey;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -3393,14 +3394,14 @@ class _DashboardTabState extends State<DashboardTab> {
                 if (imageUrl != null && imageUrl.isNotEmpty)
                   ClipRRect(
                     borderRadius: BorderRadius.circular(10),
-                    child: Image.network(
-                      imageUrl,
+                    child: AppNetworkImage(
+                      url: imageUrl,
                       width: 32,
                       height: 32,
                       fit: BoxFit.cover,
                       cacheWidth: thumbCache,
                       cacheHeight: thumbCache,
-                      errorBuilder: (_, __, ___) => Container(
+                      fallback: Container(
                         width: 32,
                         height: 32,
                         color: Colors.grey.shade100,

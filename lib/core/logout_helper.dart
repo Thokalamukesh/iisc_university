@@ -2,7 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'device_layout.dart';
 import '../printer/register_kiosk.dart';
+import '../screens/customer_restaurant_selection_screen.dart';
 import '../screens/register_screen.dart';
 
 Future<void> logoutAndChangeRestaurant(BuildContext context) async {
@@ -23,8 +25,11 @@ Future<void> logoutAndChangeRestaurant(BuildContext context) async {
 
   Navigator.of(context).pushAndRemoveUntil(
     MaterialPageRoute(
-      builder: (_) =>
-          kIsWeb ? const UserIdScreen() : const RegisterKioskScreen(),
+      builder: (_) {
+        if (kIsWeb) return const UserIdScreen();
+        if (isTabletContext(context)) return const RegisterKioskScreen();
+        return const CustomerRestaurantSelectionScreen();
+      },
     ),
     (route) => false,
   );

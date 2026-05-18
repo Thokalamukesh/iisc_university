@@ -4,6 +4,16 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+// Web builds use lib/firebase_options.dart and web/index.html.
+// Native Android Firebase/OTP needs android/app/google-services.json. Keep the
+// Google Services plugin optional so web-only work is not blocked before that
+// file is added from Firebase Console.
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+} else {
+    logger.lifecycle("google-services.json not found; skipping native Firebase Android config.")
+}
+
 android {
     namespace "com.example.api_selfxo_project"
     compileSdk 36
@@ -11,8 +21,8 @@ android {
     defaultConfig {
         applicationId "com.example.api_selfxo_project"
 
-        // Required by charset_converter (minSdk 21)
-        minSdk 21
+        // Required by firebase_auth.
+        minSdk 23
 
         // Google Play requirement
         targetSdk 33

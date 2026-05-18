@@ -1,8 +1,11 @@
 import 'dart:async';
 
+import 'package:api_selfxo_project/core/device_layout.dart';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
-import 'package:api_selfxo_project/screens/payment_success.dart';
+import 'package:api_selfxo_project/screens/main_navigation.dart';
+import 'package:api_selfxo_project/screens/pickup_qr_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -29,36 +32,32 @@ class PaymentScreen extends StatefulWidget {
 
 class _PaymentScreenState extends State<PaymentScreen>
     with WidgetsBindingObserver {
-  static const Color kPrimaryOrange = Color(0xFFFF5722);
-  static const Color kBgGrey = Color(0xFFF1F3F6);
+  static const Color _brand = Color(0xFF9F342C);
+  static const Color _canvas = Color(0xFFF6F1EA);
+  static const int _failAutoCloseSeconds = 3;
 
   int _remainingSeconds = 250;
-  Timer? countdownTimer;
-  static const int _failAutoCloseSeconds = 3;
   int _failSeconds = _failAutoCloseSeconds;
   double _failProgress = 1.0;
   double _failProgressTarget = 1.0;
 
-  bool loading = true;
-  bool _started = false;
-  String? errorMessage;
-  bool _active = true;
-
-  int? orderId;
-  String? qrData;
-  double? payableAmount;
-
-  String displayRestaurantName = "OUR KITCHEN";
-
-  Timer? paymentTimer;
-  Timer? timeoutTimer;
+  Timer? _countdownTimer;
+  Timer? _paymentTimer;
+  Timer? _timeoutTimer;
   Timer? _paymentFailTimer;
 
-  int _asInt(dynamic v) {
-    if (v is int) return v;
-    if (v is num) return v.toInt();
-    return int.tryParse(v?.toString() ?? "") ?? 0;
-  }
+  bool _loading = true;
+  bool _started = false;
+  bool _active = true;
+  bool _receiptPrinted = false;
+  bool _waitingForPaymentCompletion = false;
+  String _selectedPaymentLabel = "UPI";
+
+  String? _errorMessage;
+  int? _orderId;
+  String? _qrData;
+  double? _payableAmount;
+  String _displayRestaurantName = "OUR KITCHEN";
 
   @override
   void initState() {
@@ -67,143 +66,136 @@ class _PaymentScreenState extends State<PaymentScreen>
     KioskMemoryService.instance.pause();
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      preloadRestaurantData();
+      _preloadRestaurantData();
       _startPaymentFlow();
       _startTimeout();
     });
   }
 
-  // --- POPUP DIALOG LOGIC ---
-  void _showCancelConfirmation(
-    BuildContext context, {
-    required bool isStartAgain,
-  }) {
-    final bool isTablet = MediaQuery.of(context).size.width > 600;
+  int _asInt(dynamic v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse(v?.toString() ?? "") ?? 0;
+  }
 
+  Widget _homeDestination() {
+    if (isTabletContext(context)) {
+      return const AdminHomeScreen();
+    }
+    final safeOrderType =
+        widget.orderType.trim().isEmpty ? 'dine_in' : widget.orderType;
+    return MainNavigation(orderType: safeOrderType);
+  }
+
+  // --- POPUP DIALOG LOGIC ---
+  void _showCancelConfirmation({required bool isStartAgain}) {
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) {
-        return AlertDialog(
-          backgroundColor: Colors.white,
-          surfaceTintColor: Colors.white,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(isTablet ? 40 : 26),
-          ),
-          contentPadding: EdgeInsets.all(isTablet ? 40 : 24),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // --- THEMED ICON ---
-              Container(
-                padding: EdgeInsets.all(isTablet ? 30 : 20),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFBAA30).withOpacity(0.1),
-                  shape: BoxShape.circle,
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(28),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.16),
+                  blurRadius: 30,
+                  offset: const Offset(0, 18),
                 ),
-                child: Icon(
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF0EB),
+                    borderRadius: BorderRadius.circular(22),
+                  ),
+                  child: Icon(
+                    isStartAgain
+                        ? Icons.refresh_rounded
+                        : Icons.cancel_presentation_rounded,
+                    color: _brand,
+                    size: 36,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  isStartAgain ? "Start again?" : "Cancel payment?",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF1D1D1D),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
                   isStartAgain
-                      ? Icons.refresh_rounded
-                      : Icons.cancel_presentation_rounded,
-                  color: const Color(0xFFFBAA30),
-                  size: isTablet ? 100 : 60,
+                      ? "Your current order progress will be cleared."
+                      : "This payment session will be closed and the order will be cancelled.",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 14.5,
+                    height: 1.5,
+                    color: Colors.black54,
+                  ),
                 ),
-              ),
-              SizedBox(height: isTablet ? 30 : 20),
-
-              // --- TITLE ---
-              Text(
-                isStartAgain ? "RESTART ORDER?" : "CANCEL PAYMENT?",
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: isTablet ? 32 : 22,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.black87,
-                  letterSpacing: 1.2,
-                ),
-              ),
-              const SizedBox(height: 15),
-
-              // --- CONTENT TEXT ---
-              Text(
-                isStartAgain
-                    ? "Are you sure you want to go back to the start?\nYour current progress will be lost."
-                    : "Are you sure you want to cancel this payment\nand go back to the beginning?",
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: isTablet ? 20 : 15.5,
-                  color: Colors.black54,
-                  height: 1.5,
-                ),
-              ),
-              SizedBox(height: isTablet ? 45 : 30),
-
-              // --- BUTTON ROW ---
-              Row(
-                children: [
-                  Expanded(
-                    child: SizedBox(
-                      height: isTablet ? 85 : 55,
+                const SizedBox(height: 22),
+                Row(
+                  children: [
+                    Expanded(
                       child: OutlinedButton(
-                        style: OutlinedButton.styleFrom(
-                          side: BorderSide(
-                            color: Colors.grey.shade300,
-                            width: 2,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(
-                              isTablet ? 20 : 12,
-                            ),
-                          ),
-                        ),
                         onPressed: () => Navigator.pop(dialogContext),
-                        child: Text(
-                          "NO, STAY",
-                          style: TextStyle(
-                            fontSize: isTablet ? 18 : 13,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black54,
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(50),
+                          side: BorderSide(color: Colors.grey.shade300),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
                           ),
                         ),
+                        child: const Text("Stay"),
                       ),
                     ),
-                  ),
-                  SizedBox(width: isTablet ? 20 : 12),
-                  Expanded(
-                    child: SizedBox(
-                      height: isTablet ? 85 : 55,
+                    const SizedBox(width: 12),
+                    Expanded(
                       child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFBAA30),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(
-                              isTablet ? 20 : 12,
-                            ),
-                          ),
-                        ),
                         onPressed: () {
                           Navigator.pop(dialogContext);
                           Navigator.pushAndRemoveUntil(
                             context,
-                            MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
+                            MaterialPageRoute(
+                                builder: (_) => _homeDestination()),
                             (route) => false,
                           );
                         },
-                        child: Text(
-                          "YES, CANCEL",
-                          style: TextStyle(
-                            fontSize: isTablet ? 18 : 14,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(50),
+                          backgroundColor: _brand,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
                           ),
+                        ),
+                        child: const Text(
+                          "Confirm",
+                          style: TextStyle(fontWeight: FontWeight.w800),
                         ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-            ],
+                  ],
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -211,18 +203,27 @@ class _PaymentScreenState extends State<PaymentScreen>
   }
 
   // 🔥 FETCH SAVED NAME
-  Future<void> preloadRestaurantData() async {
+  Future<void> _preloadRestaurantData() async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedName = prefs.getString("restaurant_name")?.trim() ?? "";
+      if (savedName.isNotEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _displayRestaurantName = savedName.toUpperCase();
+        });
+        return;
+      }
+
       final res = await KioskApi().getRestaurantData();
       final restaurant = res.data["data"]?["restaurant"];
       final name = restaurant?["name"] ?? "OUR KITCHEN";
 
-      final prefs = await SharedPreferences.getInstance();
       await prefs.setString("restaurant_name", name);
 
       if (mounted) {
         setState(() {
-          displayRestaurantName = name.toUpperCase();
+          _displayRestaurantName = name.toUpperCase();
         });
       }
     } catch (e) {
@@ -232,8 +233,8 @@ class _PaymentScreenState extends State<PaymentScreen>
 
   Future<void> _startPaymentFlow() async {
     if (_started) return;
-    _startCountdown();
     _started = true;
+    _startCountdown();
 
     try {
       final orderItems = widget.cart.map((item) {
@@ -242,10 +243,7 @@ class _PaymentScreenState extends State<PaymentScreen>
         final modifiers = (item["modifiers"] as List? ?? []);
         final finalUnitPrice = basePrice +
             _asInt(variation?["price"]) +
-            modifiers.fold<int>(
-              0,
-              (sum, m) => sum + _asInt(m["price"]),
-            );
+            modifiers.fold<int>(0, (sum, m) => sum + _asInt(m["price"]));
 
         return {
           "id": item["id"],
@@ -258,9 +256,8 @@ class _PaymentScreenState extends State<PaymentScreen>
           "variation_name": variation?["variation"],
           "has_modifiers": modifiers.isNotEmpty,
           "modifiers": modifiers
-              .map(
-                (m) => {"id": m["id"], "name": m["name"], "price": m["price"]},
-              )
+              .map((m) =>
+                  {"id": m["id"], "name": m["name"], "price": m["price"]})
               .toList(),
         };
       }).toList();
@@ -270,22 +267,29 @@ class _PaymentScreenState extends State<PaymentScreen>
         orderItems: orderItems,
       );
 
-      orderId = createRes.data["order"]?["id"];
+      _orderId = createRes.data["order"]?["id"];
 
       final prefs = await SharedPreferences.getInstance();
       final restaurantId = prefs.getString("restaurant_id");
-      await DeviceInfoUtil.getDeviceId(restaurantId: restaurantId!);
+      if (restaurantId != null && restaurantId.trim().isNotEmpty) {
+        await DeviceInfoUtil.getDeviceId(restaurantId: restaurantId);
+      }
 
-      final qrRes = await KioskApi().generateQr(orderId: orderId!);
+      final qrRes = await KioskApi().generateQr(orderId: _orderId!);
 
-      qrData = _extractQrString(qrRes.data);
+      _qrData = _extractQrString(qrRes.data);
 
       final amountPaise = _extractAmountPaise(qrRes.data);
-      payableAmount = amountPaise != null
+      _payableAmount = amountPaise != null
           ? amountPaise / 100
           : widget.totalAmount.toDouble();
 
-      if (mounted) setState(() => loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _waitingForPaymentCompletion = false;
+        });
+      }
       _startPaymentPolling();
     } catch (e) {
       _handleError(e.toString());
@@ -383,98 +387,248 @@ class _PaymentScreenState extends State<PaymentScreen>
     return findIn(payload, 4);
   }
 
-  bool _looksLikeImageUrl(String value) {
-    final v = value.toLowerCase();
-    if (!(v.startsWith("http://") || v.startsWith("https://"))) return false;
-    return v.contains(".png") ||
-        v.contains(".jpg") ||
-        v.contains(".jpeg") ||
-        v.contains(".webp");
-  }
-
   void _startPaymentPolling() {
-    paymentTimer?.cancel();
-    paymentTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
-      if (!_active || !mounted) return;
-      if (orderId == null) return;
+    _paymentTimer?.cancel();
+    _paymentTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (!_active || !mounted || _orderId == null) return;
 
       try {
-        final res = await KioskApi().checkPayment(orderId!);
-
-        if (res.data["status"] == "paid") {
-          paymentTimer?.cancel();
-
+        final res = await KioskApi().checkPayment(_orderId!);
+        if (_isPaymentCompleted(res.data)) {
+          _paymentTimer?.cancel();
           await _handlePaymentSuccess();
         }
       } catch (_) {}
     });
   }
 
-  bool _receiptPrinted = false;
+  bool _isPaymentCompleted(dynamic data) {
+    bool isPaidStatus(dynamic status) {
+      if (status == true) return true;
+      if (status is num) return status == 1;
+      final s = status?.toString().trim().toLowerCase() ?? "";
+      if (s.isEmpty) return false;
+      if (s.contains("cancel") ||
+          s.contains("refund") ||
+          s.contains("failed") ||
+          s.contains("void") ||
+          s.contains("unpaid") ||
+          s.contains("pending")) {
+        return false;
+      }
+      return s.contains("paid") ||
+          s.contains("completed") ||
+          s.contains("success") ||
+          s.contains("successful") ||
+          s.contains("captured") ||
+          s.contains("authorized");
+    }
+
+    bool findIn(dynamic value, int depth) {
+      if (value == null || depth <= 0) return false;
+      if (value is Map) {
+        for (final key in const [
+          "status",
+          "payment_status",
+          "paymentStatus",
+          "order_status",
+          "orderStatus",
+          "state",
+          "payment_state",
+          "paymentState",
+          "paid",
+          "is_paid",
+          "isPaid",
+          "success",
+          "is_success",
+          "isSuccess",
+          "result",
+          "message",
+        ]) {
+          if (value.containsKey(key) && isPaidStatus(value[key])) {
+            return true;
+          }
+        }
+        for (final nestedKey in const [
+          "data",
+          "order",
+          "payment",
+          "response",
+          "result",
+          "payload",
+        ]) {
+          if (value.containsKey(nestedKey) &&
+              findIn(value[nestedKey], depth - 1)) {
+            return true;
+          }
+        }
+        for (final entry in value.entries) {
+          if (findIn(entry.value, depth - 1)) return true;
+        }
+      } else if (value is List) {
+        for (final item in value) {
+          if (findIn(item, depth - 1)) return true;
+        }
+      } else if (isPaidStatus(value)) {
+        return true;
+      }
+      return false;
+    }
+
+    return findIn(data, 5);
+  }
 
   Future<void> _handlePaymentSuccess() async {
     if (_receiptPrinted) return;
     _receiptPrinted = true;
-    countdownTimer?.cancel();
-    timeoutTimer?.cancel();
+    _countdownTimer?.cancel();
+    _timeoutTimer?.cancel();
     _paymentFailTimer?.cancel();
 
-    // 🎉 Always continue
     if (!_active || !mounted) return;
-    _showSuccess();
+    setState(() {
+      _waitingForPaymentCompletion = false;
+    });
+
+    bool alreadyPrinted = false;
+    try {
+      final orderId = _orderId;
+      if (orderId != null) {
+        final details = await KioskApi().getOrderDetails(orderId);
+        alreadyPrinted = _hasPrintedMarker(details.data, 7);
+      }
+    } catch (_) {}
+
+    if (!_active || !mounted) return;
+    if (alreadyPrinted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => PickupQrScreen(
+            cart: widget.cart,
+            orderId: _orderId!,
+            restaurantName: _displayRestaurantName,
+            orderType: widget.orderType,
+          ),
+        ),
+      );
+      return;
+    }
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PickupQrScreen(
+          cart: widget.cart,
+          orderId: _orderId!,
+          restaurantName: _displayRestaurantName,
+          orderType: widget.orderType,
+        ),
+      ),
+    );
+  }
+
+  bool _hasPrintedMarker(dynamic value, int depth) {
+    if (value == null || depth <= 0) return false;
+
+    bool looksPrinted(dynamic raw) {
+      if (raw == true) return true;
+      if (raw is num) return raw > 0;
+      final s = raw?.toString().trim().toLowerCase() ?? '';
+      if (s.isEmpty) return false;
+      return s.contains('printed') ||
+          s.contains('print_success') ||
+          s.contains('receipt_printed') ||
+          s.contains('served') ||
+          s.contains('picked') ||
+          s.contains('fulfilled') ||
+          s.contains('completed');
+    }
+
+    if (value is Map) {
+      for (final key in const [
+        'is_printed',
+        'printed',
+        'print_status',
+        'printStatus',
+        'receipt_printed',
+        'receiptPrinted',
+        'printed_at',
+        'printedAt',
+        'print_count',
+        'printCount',
+        'status',
+        'order_status',
+        'orderStatus',
+        'pickup_status',
+        'pickupStatus',
+      ]) {
+        if (value.containsKey(key) && looksPrinted(value[key])) {
+          return true;
+        }
+      }
+      for (final nestedKey in const [
+        'data',
+        'order',
+        'details',
+        'order_details',
+        'orderDetails',
+        'payload',
+        'result',
+      ]) {
+        if (value.containsKey(nestedKey) &&
+            _hasPrintedMarker(value[nestedKey], depth - 1)) {
+          return true;
+        }
+      }
+      for (final entry in value.entries) {
+        if (_hasPrintedMarker(entry.value, depth - 1)) return true;
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        if (_hasPrintedMarker(item, depth - 1)) return true;
+      }
+    }
+
+    return false;
   }
 
   void _handleError(String msg) {
-    paymentTimer?.cancel();
-    countdownTimer?.cancel();
+    _paymentTimer?.cancel();
+    _countdownTimer?.cancel();
     _paymentFailTimer?.cancel();
-    if (_active && mounted) {
-      setState(() {
-        loading = false;
-        errorMessage = msg;
-      });
-    }
+    if (!mounted || !_active || _receiptPrinted) return;
+    setState(() {
+      _loading = false;
+      _errorMessage = msg;
+      _waitingForPaymentCompletion = false;
+    });
     _startFailAutoClose();
   }
 
   void _startCountdown() {
-    countdownTimer?.cancel();
-    countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!_active || !mounted) return;
       if (_remainingSeconds <= 0) {
         timer.cancel();
-        if (errorMessage == null) {
+        if (_errorMessage == null && !_receiptPrinted) {
           _handleError("Payment timed out");
         }
       } else {
-        setState(() => _remainingSeconds--);
+        setState(() {
+          _remainingSeconds--;
+        });
       }
     });
   }
 
   void _startTimeout() {
-    timeoutTimer?.cancel();
-    timeoutTimer = Timer(
-      Duration(seconds: _remainingSeconds),
-      () {
-        if (!_active || !mounted) return;
-        _handleError("Payment timed out");
-      },
-    );
-  }
-
-  void _showSuccess() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) => PaymentSuccessDialog(
-          cart: widget.cart,
-          orderNumber: orderId!,
-          restaurantName: displayRestaurantName,
-          orderType: widget.orderType,
-        ),
-      ),
-    );
+    _timeoutTimer?.cancel();
+    _timeoutTimer = Timer(Duration(seconds: _remainingSeconds), () {
+      if (!_active || !mounted || _receiptPrinted) return;
+      _handleError("Payment timed out");
+    });
   }
 
   void _startFailAutoClose() {
@@ -491,27 +645,143 @@ class _PaymentScreenState extends State<PaymentScreen>
         timer.cancel();
         Navigator.pushAndRemoveUntil(
           context,
-          MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
+          MaterialPageRoute(builder: (_) => _homeDestination()),
           (route) => false,
         );
       } else {
-        try {
-          setState(() {
-            _failSeconds--;
-            _failProgressTarget = _failSeconds / _failAutoCloseSeconds;
-          });
-        } catch (_) {}
+        setState(() {
+          _failSeconds--;
+          _failProgressTarget = _failSeconds / _failAutoCloseSeconds;
+        });
       }
     });
+  }
+
+  Future<void> _handlePayNow([String app = "generic"]) async {
+    final upiValue = _resolveUpiPaymentLink();
+    if (upiValue == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            "Payment link is not ready yet. Please wait a moment and try again.",
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _waitingForPaymentCompletion = true;
+        _selectedPaymentLabel = _getAppDisplayName(app);
+      });
+    }
+
+    final launched = _launchPreferredUpiTarget(upiValue, app);
+    if (launched) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            app == "generic"
+                ? "Complete payment in your UPI app. After payment, the scan-to-print screen will open automatically."
+                : "Complete payment in $_selectedPaymentLabel. After payment, the scan-to-print screen will open automatically.",
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _waitingForPaymentCompletion = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          "Unable to open a UPI app on this device. Please try another UPI app.",
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  String? _resolveUpiPaymentLink() {
+    final raw = _qrData?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    if (raw.startsWith("upi://pay")) {
+      return raw;
+    }
+    return null;
+  }
+
+  bool _launchPreferredUpiTarget(String upiValue, String app) {
+    final targets = _preferredLaunchTargets(upiValue, app);
+    for (final target in targets) {
+      if (_launchUpiInMobile(target)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _launchUpiInMobile(String target) {
+    try {
+      launchUrl(Uri.parse(target), mode: LaunchMode.externalApplication);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  List<String> _preferredLaunchTargets(String upiValue, String app) {
+    final uri = Uri.parse(upiValue);
+    final query = uri.hasQuery ? '?${uri.query}' : '';
+    switch (app) {
+      case "googlePay":
+        return [
+          'tez://upi/pay$query',
+          'gpay://upi/pay$query',
+          'intent://upi/pay$query#Intent;scheme=tez;package=com.google.android.apps.nbu.paisa.user;end',
+        ];
+      case "phonePe":
+        return [
+          'phonepe://pay$query',
+          'intent://pay$query#Intent;scheme=phonepe;package=com.phonepe.app;end',
+        ];
+      case "paytm":
+        return [
+          'paytmmp://pay$query',
+          'intent://pay$query#Intent;scheme=paytmmp;package=net.one97.paytm;end',
+        ];
+      default:
+        return [upiValue];
+    }
+  }
+
+  String _getAppDisplayName(String app) {
+    switch (app) {
+      case "googlePay":
+        return "Google Pay";
+      case "phonePe":
+        return "PhonePe";
+      case "paytm":
+        return "Paytm";
+      default:
+        return "UPI";
+    }
   }
 
   @override
   void dispose() {
     _active = false;
     WidgetsBinding.instance.removeObserver(this);
-    paymentTimer?.cancel();
-    timeoutTimer?.cancel();
-    countdownTimer?.cancel();
+    _paymentTimer?.cancel();
+    _timeoutTimer?.cancel();
+    _countdownTimer?.cancel();
     _paymentFailTimer?.cancel();
     IdleTimer.resume();
     KioskMemoryService.instance.resume();
@@ -520,144 +790,708 @@ class _PaymentScreenState extends State<PaymentScreen>
 
   @override
   Widget build(BuildContext context) {
+    final amountLabel =
+        "₹${(_payableAmount ?? widget.totalAmount.toDouble()).toStringAsFixed(2)}";
+
     return Scaffold(
-      backgroundColor: kBgGrey,
-      appBar: _buildAppBar(),
+      backgroundColor: _canvas,
       body: Stack(
         children: [
-          loading
-              ? const Center(
-                  child: CircularProgressIndicator(color: kPrimaryOrange),
-                )
-              : Column(
-                  children: [
-                    _buildTimerHeader(),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: _buildPaymentCard(),
-                      ),
-                    ),
-                    _buildBottomAction(),
+          const Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Color(0xFFF8F2EA),
+                    Color(0xFFF0E7DC),
+                    Color(0xFFEDE6DE)
                   ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-          if (errorMessage != null) _buildErrorOverlay(),
+              ),
+            ),
+          ),
+          Positioned(
+            top: -120,
+            right: -60,
+            child: Container(
+              width: 260,
+              height: 260,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFFD97C59).withOpacity(0.12),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 180,
+            left: -90,
+            child: Container(
+              width: 220,
+              height: 220,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFFB1493C).withOpacity(0.08),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: -80,
+            right: -50,
+            child: Container(
+              width: 240,
+              height: 240,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFFC7B39E).withOpacity(0.18),
+              ),
+            ),
+          ),
+          SafeArea(
+            child: _loading
+                ? _MobilePaymentLoading(
+                    onCancel: () => _showCancelConfirmation(isStartAgain: true),
+                  )
+                : _MobilePaymentLayout(
+                    remainingSeconds: _remainingSeconds,
+                    restaurantName: _displayRestaurantName,
+                    amountLabel: amountLabel,
+                    viewportHeight: MediaQuery.sizeOf(context).height,
+                    paymentQrData: _qrData,
+                    paymentHint: _waitingForPaymentCompletion
+                        ? "Complete payment in $_selectedPaymentLabel. After payment, the scan-to-print screen will open automatically."
+                        : "Choose your payment app below to pay securely.",
+                    onGooglePay: () => _handlePayNow("googlePay"),
+                    onPhonePe: () => _handlePayNow("phonePe"),
+                    onPaytm: () => _handlePayNow("paytm"),
+                    onOtherUpi: () => _handlePayNow("generic"),
+                    onCancel: () =>
+                        _showCancelConfirmation(isStartAgain: false),
+                    onStartAgain: () =>
+                        _showCancelConfirmation(isStartAgain: true),
+                  ),
+          ),
+          if (_errorMessage != null)
+            _MobilePaymentErrorOverlay(
+              message: _errorMessage!,
+              seconds: _failSeconds,
+              progress: _failProgress,
+              targetProgress: _failProgressTarget,
+              onProgressEnd: () {
+                if (!mounted) return;
+                if (_failProgress != _failProgressTarget) {
+                  setState(() {
+                    _failProgress = _failProgressTarget;
+                  });
+                }
+              },
+            ),
         ],
       ),
     );
   }
+}
 
-  PreferredSizeWidget _buildAppBar() {
-    final bool isTablet = MediaQuery.of(context).size.width > 600;
-    return AppBar(
-      toolbarHeight: isTablet ? 100 : 80,
-      backgroundColor: const Color(0xFF9F342C),
-      elevation: 0,
-      leadingWidth: 140, // enough space for logo
-      leading: Padding(
-        padding: const EdgeInsets.only(left: 12),
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Image.asset(
-            "assets/self.png",
-            height: 36,
-            fit: BoxFit.contain,
-          ),
-        ),
-      ),
-      actions: [
-        Padding(
-          padding: const EdgeInsets.only(right: 16, top: 10, bottom: 10),
-          child: OutlinedButton(
-            onPressed: () =>
-                _showCancelConfirmation(context, isStartAgain: true),
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: Colors.white),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
+class _MobilePaymentLoading extends StatelessWidget {
+  final VoidCallback onCancel;
+
+  const _MobilePaymentLoading({required this.onCancel});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: Container(
+            padding: const EdgeInsets.all(32),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFFFFFFFF), Color(0xFFFFF8F2)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              borderRadius: BorderRadius.circular(32),
+              border: Border.all(color: const Color(0xFFEBDFD3)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.08),
+                  blurRadius: 34,
+                  offset: const Offset(0, 20),
+                ),
+              ],
             ),
-            child: const Row(
+            child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.home_rounded, color: Colors.white, size: 18),
-                SizedBox(width: 8),
-                Text(
-                  "Start Again",
+                Row(
+                  children: [
+                    Image.asset(
+                      "assets/self.png",
+                      height: 42,
+                      fit: BoxFit.contain,
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: onCancel,
+                      child: const Text("Cancel"),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Container(
+                  width: 84,
+                  height: 84,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFFB3483A), Color(0xFF862A22)],
+                    ),
+                    borderRadius: BorderRadius.circular(26),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.all(22),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 3,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  "Preparing payment",
+                  textAlign: TextAlign.center,
                   style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
+                    fontSize: 26,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF1D1D1D),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  "Creating your order and preparing your payment apps.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    height: 1.5,
+                    color: Colors.black54,
                   ),
                 ),
               ],
             ),
           ),
         ),
-      ],
+      ),
     );
   }
+}
 
-  Widget _buildTimerHeader() {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF0F2F5),
-        borderRadius: BorderRadius.circular(16),
+class _MobilePaymentLayout extends StatelessWidget {
+  final int remainingSeconds;
+  final String restaurantName;
+  final String amountLabel;
+  final double viewportHeight;
+  final String? paymentQrData;
+  final String paymentHint;
+  final VoidCallback onGooglePay;
+  final VoidCallback onPhonePe;
+  final VoidCallback onPaytm;
+  final VoidCallback onOtherUpi;
+  final VoidCallback onCancel;
+  final VoidCallback onStartAgain;
+
+  const _MobilePaymentLayout({
+    required this.remainingSeconds,
+    required this.restaurantName,
+    required this.amountLabel,
+    required this.viewportHeight,
+    required this.paymentQrData,
+    required this.paymentHint,
+    required this.onGooglePay,
+    required this.onPhonePe,
+    required this.onPaytm,
+    required this.onOtherUpi,
+    required this.onCancel,
+    required this.onStartAgain,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final screenSize = media.size;
+    final safeVertical = media.padding.top + media.padding.bottom;
+    final shortScreen = screenSize.height < 820;
+    final topPadding = shortScreen ? 14.0 : 20.0;
+    final bottomPadding = shortScreen ? 18.0 : 24.0;
+    final availableHeight =
+        (screenSize.height - safeVertical - topPadding - bottomPadding)
+            .clamp(420.0, screenSize.height);
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, topPadding, 20, bottomPadding),
+      child: SizedBox(
+        width: double.infinity,
+        height: availableHeight,
+        child: _MobilePaymentMainCard(
+          remainingSeconds: remainingSeconds,
+          restaurantName: restaurantName,
+          amountLabel: amountLabel,
+          paymentQrData: paymentQrData,
+          paymentHint: paymentHint,
+          onGooglePay: onGooglePay,
+          onPhonePe: onPhonePe,
+          onPaytm: onPaytm,
+          onOtherUpi: onOtherUpi,
+          onCancel: onCancel,
+          onStartAgain: onStartAgain,
+        ),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // ⏱ ICON + SECONDS (SAME ROW, CENTERED)
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
+    );
+  }
+}
+
+class _MobilePaymentMainCard extends StatelessWidget {
+  final int remainingSeconds;
+  final String restaurantName;
+  final String amountLabel;
+  final String? paymentQrData;
+  final String paymentHint;
+  final VoidCallback onGooglePay;
+  final VoidCallback onPhonePe;
+  final VoidCallback onPaytm;
+  final VoidCallback onOtherUpi;
+  final VoidCallback onCancel;
+  final VoidCallback onStartAgain;
+
+  const _MobilePaymentMainCard({
+    required this.remainingSeconds,
+    required this.restaurantName,
+    required this.amountLabel,
+    required this.paymentQrData,
+    required this.paymentHint,
+    required this.onGooglePay,
+    required this.onPhonePe,
+    required this.onPaytm,
+    required this.onOtherUpi,
+    required this.onCancel,
+    required this.onStartAgain,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 560;
+        final ultraShortCard = constraints.maxHeight < 620;
+        final outerPadding = compact ? 16.0 : 22.0;
+        final heroPadding = compact ? 18.0 : 24.0;
+        final sectionPadding = compact ? 14.0 : 18.0;
+        final heroActionHeight = compact ? 68.0 : 72.0;
+        final footerActionHeight = compact ? 48.0 : 54.0;
+        final amountSize = ultraShortCard ? 24.0 : (compact ? 30.0 : 36.0);
+        final timerValueSize = ultraShortCard ? 22.0 : 28.0;
+
+        return Padding(
+          padding: EdgeInsets.all(outerPadding),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Container(
-                padding: const EdgeInsets.all(8),
+                padding: EdgeInsets.all(heroPadding),
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.orange, width: 3),
-                ),
-                child: const Icon(
-                  Icons.access_time_filled,
-                  color: Colors.orange,
-                  size: 28,
-                ),
-              ),
-              const SizedBox(width: 14),
-              RichText(
-                text: TextSpan(
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
+                  gradient: const LinearGradient(
+                    colors: [
+                      Color(0xFFAA4337),
+                      Color(0xFF862A22),
+                      Color(0xFF6E211A),
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
                   ),
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    TextSpan(
-                      text: "$_remainingSeconds ",
-                      style: const TextStyle(color: Colors.orange),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Image.asset(
+                          "assets/self.png",
+                          height: compact ? 32 : 38,
+                          fit: BoxFit.contain,
+                        ),
+                        const Spacer(),
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: compact ? 14 : 18,
+                            vertical: compact ? 10 : 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.14),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.12),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              const Text(
+                                "Time left",
+                                style: TextStyle(
+                                  color: Color(0xFFFDEAE2),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                "${remainingSeconds}s",
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: timerValueSize,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                    const TextSpan(
-                      text: "Seconds",
-                      style: TextStyle(color: Colors.black),
+                    SizedBox(height: compact ? 16 : 18),
+                    const SizedBox(height: 6),
+                    Text(
+                      restaurantName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: const Color(0xFFFDE4DB),
+                        fontSize: compact ? 12.5 : 13.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    SizedBox(height: compact ? 14 : 18),
+                    SizedBox(
+                      height: heroActionHeight,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Flexible(
+                            fit: FlexFit.tight,
+                            child: Container(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: compact ? 14 : 18,
+                                vertical: compact ? 8 : 10,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(22),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.account_balance_wallet_rounded,
+                                    color: Colors.white,
+                                    size: compact ? 22 : 26,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const Text(
+                                          "Amount to pay",
+                                          style: TextStyle(
+                                            color: Color(0xFFFDEAE2),
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            height: 1.1,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 1),
+                                        Expanded(
+                                          child: Align(
+                                            alignment: Alignment.bottomLeft,
+                                            child: FittedBox(
+                                              fit: BoxFit.scaleDown,
+                                              alignment: Alignment.centerLeft,
+                                              child: Text(
+                                                amountLabel,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: amountSize,
+                                                  fontWeight: FontWeight.w900,
+                                                  height: 1,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          SizedBox(
+                            height: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: onStartAgain,
+                              icon: Icon(
+                                Icons.refresh_rounded,
+                                size: compact ? 16 : 18,
+                              ),
+                              label: Text(compact ? "Restart" : "Start Again"),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.white,
+                                side: BorderSide(
+                                  color: Colors.white.withOpacity(0.34),
+                                ),
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: compact ? 12 : 16,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
               ),
+              SizedBox(height: compact ? 14 : 18),
+              Expanded(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: sectionPadding,
+                    vertical: compact ? 2 : 4,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        "Choose your payment app",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: compact ? 17 : 19,
+                          fontWeight: FontWeight.w800,
+                          color: const Color(0xFF1D1D1D),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        paymentHint,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: compact ? 12.5 : 13.5,
+                          height: 1.45,
+                          color: Colors.black54,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      SizedBox(height: compact ? 14 : 16),
+                      if (paymentQrData != null) ...[
+                        _MobilePaymentQrCard(
+                          qrData: paymentQrData!,
+                          amountLabel: amountLabel,
+                          compact: compact,
+                        ),
+                        SizedBox(height: compact ? 12 : 14),
+                      ],
+                      _MobilePayAppTile(
+                        title: "Google Pay",
+                        subtitle: "Open Google Pay",
+                        assetPath: "assets/payment_icons/google_pay.svg",
+                        accent: const Color(0xFFEAF2FF),
+                        foreground: const Color(0xFF1A73E8),
+                        compact: compact,
+                        onTap: onGooglePay,
+                      ),
+                      SizedBox(height: compact ? 10 : 12),
+                      _MobilePayAppTile(
+                        title: "PhonePe",
+                        subtitle: "Open PhonePe",
+                        assetPath: "assets/payment_icons/phonepe.svg",
+                        accent: const Color(0xFFF4ECFF),
+                        foreground: const Color(0xFF5F259F),
+                        compact: compact,
+                        onTap: onPhonePe,
+                      ),
+                      SizedBox(height: compact ? 10 : 12),
+                      _MobilePayAppTile(
+                        title: "Paytm",
+                        subtitle: "Open Paytm",
+                        assetPath: "assets/payment_icons/paytm.svg",
+                        accent: const Color(0xFFEAF8FF),
+                        foreground: const Color(0xFF20336B),
+                        compact: compact,
+                        onTap: onPaytm,
+                      ),
+                      SizedBox(height: compact ? 10 : 12),
+                      _MobilePayAppTile(
+                        title: "Open Any UPI",
+                        subtitle: "Open any UPI app",
+                        icon: Icons.account_balance_wallet_rounded,
+                        accent: const Color(0xFFFFF0E5),
+                        foreground: const Color(0xFFB55A21),
+                        compact: compact,
+                        onTap: onOtherUpi,
+                      ),
+                      SizedBox(height: compact ? 12 : 14),
+                      SizedBox(
+                        height: footerActionHeight,
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Flexible(
+                              fit: FlexFit.tight,
+                              child: OutlinedButton(
+                                onPressed: onOtherUpi,
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFF9F342C),
+                                  side: const BorderSide(
+                                    color: Color(0xFFD8C6B4),
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(18),
+                                  ),
+                                ),
+                                child: Text(
+                                  "Open Any UPI",
+                                  style: TextStyle(
+                                    fontSize: compact ? 13.5 : 14.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            SizedBox(
+                              height: double.infinity,
+                              child: TextButton(
+                                onPressed: onCancel,
+                                style: TextButton.styleFrom(
+                                  foregroundColor: const Color(0xFF9F342C),
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: compact ? 8 : 12,
+                                  ),
+                                ),
+                                child: Text(
+                                  compact ? "Cancel" : "Cancel Order",
+                                  style: TextStyle(
+                                    fontSize: compact ? 13.5 : 14.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(height: compact ? 8 : 12),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
+        );
+      },
+    );
+  }
+}
 
-          const SizedBox(height: 6),
+class _MobilePaymentQrCard extends StatelessWidget {
+  final String qrData;
+  final String amountLabel;
+  final bool compact;
 
-          // 🧾 SUBTEXT
-          const Text(
-            "remaining to complete Payment",
+  const _MobilePaymentQrCard({
+    required this.qrData,
+    required this.amountLabel,
+    required this.compact,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final qrSize = compact ? 170.0 : 196.0;
+
+    return Container(
+      padding: EdgeInsets.all(compact ? 14 : 18),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBF7),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFEADCCD)),
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0xFF9F342C).withOpacity(0.08),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              "TEST PAYMENT QR",
+              style: TextStyle(
+                fontSize: compact ? 11 : 12,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1,
+                color: const Color(0xFF9F342C),
+              ),
+            ),
+          ),
+          SizedBox(height: compact ? 10 : 12),
+          Text(
+            "Scan this QR with any UPI app to pay $amountLabel.",
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: Colors.black87,
-              fontSize: 14,
+              fontSize: compact ? 12.5 : 13.5,
+              height: 1.4,
+              fontWeight: FontWeight.w600,
+              color: const Color(0xFF3B3028),
+            ),
+          ),
+          SizedBox(height: compact ? 12 : 14),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(22),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 16,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: QrImageView(
+              data: qrData,
+              size: qrSize,
+              backgroundColor: Colors.white,
+            ),
+          ),
+          SizedBox(height: compact ? 10 : 12),
+          Text(
+            "After payment is completed, the order QR and barcode screen will open automatically for printing.",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: compact ? 11.5 : 12.5,
+              height: 1.45,
+              color: Colors.black54,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -665,250 +1499,154 @@ class _PaymentScreenState extends State<PaymentScreen>
       ),
     );
   }
+}
 
-  Widget _buildPaymentCard() {
-    final bool isTablet = _isTabletDevice(context);
-    final String qrValue = qrData?.trim() ?? "";
-    final String fallbackQrValue =
-        "upi://pay?pa=test@upi&pn=Shop&am=${(payableAmount ?? widget.totalAmount.toDouble()).toStringAsFixed(0)}";
-    final String effectiveQrValue =
-        qrValue.isNotEmpty ? qrValue : fallbackQrValue;
-    final String amountLabel =
-        "₹${(payableAmount ?? widget.totalAmount.toDouble()).toStringAsFixed(2)}";
+class _MobilePayAppTile extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final String? assetPath;
+  final IconData? icon;
+  final Color accent;
+  final Color foreground;
+  final bool compact;
+  final VoidCallback onTap;
 
-    return Center(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: isTablet ? 500 : 420,
-        ),
-        child: Container(
+  const _MobilePayAppTile({
+    required this.title,
+    required this.subtitle,
+    this.assetPath,
+    this.icon,
+    required this.accent,
+    required this.foreground,
+    this.compact = false,
+    required this.onTap,
+  }) : assert(assetPath != null || icon != null);
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(22),
+        onTap: onTap,
+        child: Ink(
           width: double.infinity,
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 10 : 14,
+            vertical: compact ? 10 : 14,
+          ),
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(isTablet ? 24 : 12),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: const Color(0xFFE8DDD2)),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.06),
-                blurRadius: 15,
-                offset: const Offset(0, 5),
+                color: Colors.black.withOpacity(0.035),
+                blurRadius: 14,
+                offset: const Offset(0, 8),
               ),
             ],
           ),
-          child: Column(
+          child: Row(
             children: [
-              SizedBox(height: isTablet ? 40 : 24),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  displayRestaurantName,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: isTablet ? 26 : 20,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 1.2,
-                    color: Colors.black,
-                  ),
+              Container(
+                width: compact ? 40 : 48,
+                height: compact ? 40 : 48,
+                padding: EdgeInsets.all(compact ? 8 : 10),
+                decoration: BoxDecoration(
+                  color: accent,
+                  borderRadius: BorderRadius.circular(16),
                 ),
-              ),
-              SizedBox(height: isTablet ? 20 : 12),
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: isTablet ? 24 : 18),
-                child: isTablet
-                    ? TabletPaymentView(
-                        amountLabel: amountLabel,
-                        qrValue: effectiveQrValue,
-                        isImageUrl: _looksLikeImageUrl(effectiveQrValue),
-                        qrCornerBuilder: ({
-                          double? top,
-                          double? bottom,
-                          double? left,
-                          double? right,
-                          required bool isTop,
-                          required bool isLeft,
-                        }) =>
-                            _qrCorner(
-                          top: top,
-                          bottom: bottom,
-                          left: left,
-                          right: right,
-                          isTop: isTop,
-                          isLeft: isLeft,
-                          isTablet: true,
+                child: assetPath != null
+                    ? SvgPicture.asset(
+                        assetPath!,
+                        colorFilter: ColorFilter.mode(
+                          foreground,
+                          BlendMode.srcIn,
                         ),
                       )
-                    : MobilePaymentView(
-                        amountLabel: amountLabel,
-                        onPayNow: _handleMobilePayNow,
-                      ),
+                    : Icon(icon, color: foreground, size: compact ? 22 : 28),
               ),
-              SizedBox(height: isTablet ? 40 : 24),
+              SizedBox(width: compact ? 10 : 12),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: compact ? 13.5 : 15.5,
+                        fontWeight: FontWeight.w800,
+                        color: const Color(0xFF1D1D1D),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: compact ? 11.5 : 13,
+                        color: Colors.black54,
+                        height: 1.2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(width: compact ? 6 : 8),
+              Icon(
+                Icons.arrow_forward_rounded,
+                color: foreground,
+                size: compact ? 16 : 18,
+              ),
             ],
           ),
         ),
       ),
     );
   }
+}
 
-  bool _isTabletDevice(BuildContext context) {
-    final size = MediaQuery.of(context).size;
-    return size.width >= 600 || size.shortestSide >= 600;
-  }
+class _MobilePaymentErrorOverlay extends StatelessWidget {
+  final String message;
+  final int seconds;
+  final double progress;
+  final double targetProgress;
+  final VoidCallback onProgressEnd;
 
-  Future<void> _handleMobilePayNow() async {
-    final double amount = payableAmount ?? widget.totalAmount.toDouble();
-    final String fallbackUpi =
-        "upi://pay?pa=test@upi&pn=${Uri.encodeComponent(displayRestaurantName)}&am=${amount.toStringAsFixed(2)}";
-    final String upiValue = (qrData?.trim().startsWith("upi://pay") ?? false)
-        ? qrData!.trim()
-        : fallbackUpi;
-    final Uri genericUpiUri = Uri.parse(upiValue);
-    final Uri phonePeUri = Uri.parse(
-      upiValue.replaceFirst("upi://pay", "phonepe://pay"),
-    );
+  const _MobilePaymentErrorOverlay({
+    required this.message,
+    required this.seconds,
+    required this.progress,
+    required this.targetProgress,
+    required this.onProgressEnd,
+  });
 
-    if (await canLaunchUrl(genericUpiUri)) {
-      debugPrint("Proceed to payment");
-      await launchUrl(genericUpiUri, mode: LaunchMode.externalApplication);
-      return;
-    }
+  @override
+  Widget build(BuildContext context) {
+    final isTimeout = message.toLowerCase().contains("timed out");
 
-    if (await canLaunchUrl(phonePeUri)) {
-      debugPrint("Proceed to payment");
-      await launchUrl(phonePeUri, mode: LaunchMode.externalApplication);
-      return;
-    }
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("No supported UPI app found on this device"),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
-  // 🎯 Updated _qrCorner to handle thickness on tablet
-  Widget _qrCorner({
-    double? top,
-    double? bottom,
-    double? left,
-    double? right,
-    required bool isTop,
-    required bool isLeft,
-    required bool isTablet,
-  }) {
-    return Positioned(
-      top: top,
-      bottom: bottom,
-      left: left,
-      right: right,
-      child: Container(
-        width: isTablet ? 50 : 35,
-        height: isTablet ? 50 : 35,
-        decoration: BoxDecoration(
-          border: Border(
-            top: isTop
-                ? BorderSide(color: kPrimaryOrange, width: isTablet ? 6 : 4)
-                : BorderSide.none,
-            bottom: !isTop
-                ? BorderSide(color: kPrimaryOrange, width: isTablet ? 6 : 4)
-                : BorderSide.none,
-            left: isLeft
-                ? BorderSide(color: kPrimaryOrange, width: isTablet ? 6 : 4)
-                : BorderSide.none,
-            right: !isLeft
-                ? BorderSide(color: kPrimaryOrange, width: isTablet ? 6 : 4)
-                : BorderSide.none,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildBottomAction() {
-    final mediaQuery = MediaQuery.of(context);
-    final bool isTablet = mediaQuery.size.width > 600;
-    final double bottomPadding = mediaQuery.padding.bottom;
-
-    return Container(
-      width: double.infinity,
-      // Add extra padding for tablet to prevent the button from looking stretched
-      padding: EdgeInsets.fromLTRB(
-        isTablet ? 80 : 16,
-        16,
-        isTablet ? 80 : 16,
-        bottomPadding > 0 ? bottomPadding : 16,
-      ),
-      color: Colors.white,
-      child: Center(
-        // Center helps keep the button size reasonable on large tablets
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            // Limits the width on tablet so it doesn't span 1000px+
-            maxWidth: isTablet ? 400 : double.infinity,
-          ),
-          child: SizedBox(
-            width: double.infinity,
-            // Taller button for easier tapping on tablet
-            height: isTablet ? 70 : 56,
-            child: ElevatedButton.icon(
-              onPressed: () =>
-                  _showCancelConfirmation(context, isStartAgain: false),
-              icon: Icon(
-                Icons.close,
-                color: Colors.red,
-                size: isTablet ? 28 : 20,
-              ),
-              label: Text(
-                "Cancel Order",
-                style: TextStyle(
-                  color: Colors.red,
-                  fontWeight: FontWeight.bold,
-                  fontSize: isTablet ? 20 : 16,
-                ),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFFFEBEE),
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(isTablet ? 16 : 12),
-                  side: const BorderSide(color: Colors.red, width: 0.5),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildErrorOverlay() {
-    final bool isTablet = MediaQuery.of(context).size.width > 600;
-    final bool isTimeout = (errorMessage ?? "").toLowerCase().contains(
-          "timed out",
-        );
     return Positioned.fill(
       child: Material(
-        color: Colors.black.withOpacity(0.25),
+        color: Colors.black.withOpacity(0.28),
         child: Center(
           child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: isTablet ? 520 : double.infinity,
-            ),
+            constraints: const BoxConstraints(maxWidth: 460),
             child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 24),
-              padding: EdgeInsets.symmetric(
-                horizontal: isTablet ? 40 : 24,
-                vertical: isTablet ? 36 : 26,
-              ),
+              padding: const EdgeInsets.all(26),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(isTablet ? 26 : 18),
+                borderRadius: BorderRadius.circular(28),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.12),
-                    blurRadius: 20,
-                    offset: const Offset(0, 10),
+                    color: Colors.black.withOpacity(0.18),
+                    blurRadius: 28,
+                    offset: const Offset(0, 18),
                   ),
                 ],
               ),
@@ -916,62 +1654,55 @@ class _PaymentScreenState extends State<PaymentScreen>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    padding: EdgeInsets.all(isTablet ? 20 : 16),
+                    width: 78,
+                    height: 78,
                     decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.12),
-                      shape: BoxShape.circle,
+                      color: const Color(0xFFFFF0EB),
+                      borderRadius: BorderRadius.circular(24),
                     ),
-                    child: Icon(
+                    child: const Icon(
                       Icons.close_rounded,
-                      color: Colors.red,
-                      size: isTablet ? 70 : 54,
+                      color: Color(0xFF9F342C),
+                      size: 40,
                     ),
                   ),
-                  SizedBox(height: isTablet ? 24 : 18),
+                  const SizedBox(height: 18),
                   Text(
                     isTimeout ? "Order Timed Out" : "Payment Failed",
                     textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: isTablet ? 28 : 22,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.black87,
+                    style: const TextStyle(
+                      fontSize: 25,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1D1D1D),
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   Text(
-                    errorMessage ??
-                        "Your payment has been failed. Please try again.",
+                    message,
                     textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: isTablet ? 18 : 14,
+                    style: const TextStyle(
+                      fontSize: 14.5,
+                      height: 1.5,
                       color: Colors.black54,
-                      height: 1.4,
                     ),
                   ),
-                  SizedBox(height: isTablet ? 18 : 14),
+                  const SizedBox(height: 18),
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(999),
                     child: TweenAnimationBuilder<double>(
-                      tween: Tween<double>(
-                        begin: _failProgress,
-                        end: _failProgressTarget,
-                      ),
+                      tween:
+                          Tween<double>(begin: progress, end: targetProgress),
                       duration: const Duration(milliseconds: 450),
-                      onEnd: () {
-                        if (!mounted) return;
-                        if (_failProgress != _failProgressTarget) {
-                          setState(() => _failProgress = _failProgressTarget);
-                        }
-                      },
+                      onEnd: onProgressEnd,
                       builder: (_, value, __) {
                         return Directionality(
                           textDirection: TextDirection.rtl,
                           child: LinearProgressIndicator(
                             value: value.clamp(0, 1),
-                            minHeight: isTablet ? 10 : 8,
+                            minHeight: 8,
                             backgroundColor: Colors.grey.shade200,
                             valueColor: const AlwaysStoppedAnimation<Color>(
-                              Colors.redAccent,
+                              Color(0xFF9F342C),
                             ),
                           ),
                         );
@@ -980,11 +1711,11 @@ class _PaymentScreenState extends State<PaymentScreen>
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    "Returning to Welcome in ${_failSeconds}s",
-                    style: TextStyle(
-                      fontSize: isTablet ? 16 : 13,
+                    "Returning in ${seconds}s",
+                    style: const TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w700,
                       color: Colors.black54,
-                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
@@ -993,185 +1724,6 @@ class _PaymentScreenState extends State<PaymentScreen>
           ),
         ),
       ),
-    );
-  }
-}
-
-class TabletPaymentView extends StatelessWidget {
-  final String amountLabel;
-  final String qrValue;
-  final bool isImageUrl;
-  final Widget Function({
-    double? top,
-    double? bottom,
-    double? left,
-    double? right,
-    required bool isTop,
-    required bool isLeft,
-  }) qrCornerBuilder;
-
-  const TabletPaymentView({
-    super.key,
-    required this.amountLabel,
-    required this.qrValue,
-    required this.isImageUrl,
-    required this.qrCornerBuilder,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Text(
-          amountLabel,
-          style: const TextStyle(
-            fontSize: 40,
-            fontWeight: FontWeight.w900,
-            color: Colors.orange,
-          ),
-        ),
-        const SizedBox(height: 12),
-        const Text(
-          "Scan to Pay",
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-            color: Colors.black87,
-          ),
-        ),
-        const SizedBox(height: 28),
-        Container(
-          padding: const EdgeInsets.all(12),
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              if (isImageUrl)
-                Image.network(
-                  qrValue,
-                  width: 320,
-                  height: 320,
-                  fit: BoxFit.contain,
-                  errorBuilder: (_, __, ___) => _buildQrFallback(),
-                )
-              else
-                QrImageView(
-                  data: qrValue,
-                  size: 320,
-                  padding: const EdgeInsets.all(16),
-                  errorStateBuilder: (_, __) => _buildQrFallback(),
-                ),
-              qrCornerBuilder(top: 0, left: 0, isTop: true, isLeft: true),
-              qrCornerBuilder(top: 0, right: 0, isTop: true, isLeft: false),
-              qrCornerBuilder(
-                bottom: 0,
-                left: 0,
-                isTop: false,
-                isLeft: true,
-              ),
-              qrCornerBuilder(
-                bottom: 0,
-                right: 0,
-                isTop: false,
-                isLeft: false,
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildQrFallback() {
-    return Container(
-      width: 320,
-      height: 320,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade300),
-      ),
-      child: const Text(
-        "Invalid QR data",
-        style: TextStyle(
-          color: Colors.redAccent,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-}
-
-class MobilePaymentView extends StatelessWidget {
-  final String amountLabel;
-  final VoidCallback onPayNow;
-
-  const MobilePaymentView({
-    super.key,
-    required this.amountLabel,
-    required this.onPayNow,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 18),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFFF3E0),
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: Column(
-            children: [
-              const Text(
-                "Total Bill",
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.black54,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                amountLabel,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 34,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.orange,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 18),
-        SizedBox(
-          width: double.infinity,
-          height: 56,
-          child: ElevatedButton(
-            onPressed: onPayNow,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF9F342C),
-              foregroundColor: Colors.white,
-              elevation: 2,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-            ),
-            child: const Text(
-              "Pay Now",
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

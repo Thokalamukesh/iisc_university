@@ -146,7 +146,8 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
                   ? prefs.getString("restaurant_name")!.trim()
                   : "Restaurant";
           restaurantAddress = null;
-          _restaurantIdCtrl.text = prefs.getString("restaurant_id")?.trim() ?? "";
+          _restaurantIdCtrl.text =
+              prefs.getString("restaurant_id")?.trim() ?? "";
           _kioskNameCtrl.text =
               (savedName != null && savedName.trim().isNotEmpty)
                   ? savedName.trim()
@@ -271,7 +272,8 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     setState(() => _savingKioskName = true);
     try {
       final prefs = await SharedPreferences.getInstance();
-      final hasAuthToken = (prefs.getString("auth_token")?.trim() ?? "").isNotEmpty;
+      final hasAuthToken =
+          (prefs.getString("auth_token")?.trim() ?? "").isNotEmpty;
       final hasAdminToken =
           (prefs.getString("admin_token")?.trim() ?? "").isNotEmpty;
       if (!hasAuthToken && !hasAdminToken) {
@@ -633,10 +635,14 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     );
     final endpoints = <String>[
       WebApiConfig.allRestaurantsUrl,
-      "https://selfpos.sirixo.com/api/all-restaurants",
       "https://gitam.sirixo.com/api/all-restaurants",
     ];
     for (final endpoint in endpoints) {
+      final uri = Uri.tryParse(endpoint);
+      final isDeprecatedRestaurantsEndpoint =
+          uri?.host.toLowerCase() == "selfpos.sirixo.com" &&
+              uri?.path.toLowerCase() == "/api/all-restaurants";
+      if (isDeprecatedRestaurantsEndpoint) continue;
       try {
         kioskLog('validating restaurant id via $endpoint', tag: 'SETUP');
         final res = await dio.get(endpoint);
@@ -817,10 +823,14 @@ class _RegisterKioskScreenState extends State<RegisterKioskScreen> {
     final endpoints = <String>[
       WebApiConfig.allRestaurantsUrl,
       "https://gitam.sirixo.com/api/all-restaurants",
-      "https://selfpos.sirixo.com/api/all-restaurants",
     ];
 
     for (final endpoint in endpoints) {
+      final uri = Uri.tryParse(endpoint);
+      final isDeprecatedRestaurantsEndpoint =
+          uri?.host.toLowerCase() == "selfpos.sirixo.com" &&
+              uri?.path.toLowerCase() == "/api/all-restaurants";
+      if (isDeprecatedRestaurantsEndpoint) continue;
       try {
         final res = await dio.get(endpoint);
         final data = res.data;

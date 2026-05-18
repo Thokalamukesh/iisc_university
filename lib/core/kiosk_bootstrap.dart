@@ -14,6 +14,23 @@ class DeviceBootstrap {
         id.startsWith("unknown_ios_");
   }
 
+  static String _registeredDeviceKey(String deviceId) {
+    return "kiosk_registered_device_$deviceId";
+  }
+
+  static bool _isWebGeneratedDeviceId(String deviceId) {
+    final id = deviceId.trim().toLowerCase();
+    return id.startsWith("web_") || id.startsWith("web_base_");
+  }
+
+  static bool _shouldProbeExistingToken(
+    SharedPreferences prefs,
+    String deviceId,
+  ) {
+    if (!_isWebGeneratedDeviceId(deviceId)) return true;
+    return prefs.getBool(_registeredDeviceKey(deviceId)) ?? false;
+  }
+
   static Future<Map<String, String>?> _findRestaurantByAnyId(
       String value) async {
     final needle = value.trim().toLowerCase();
@@ -29,9 +46,13 @@ class DeviceBootstrap {
     final endpoints = <String>[
       WebApiConfig.allRestaurantsUrl,
       "https://gitam.sirixo.com/api/all-restaurants",
-      "https://selfpos.sirixo.com/api/all-restaurants",
     ];
     for (final endpoint in endpoints) {
+      final uri = Uri.tryParse(endpoint);
+      final isDeprecatedRestaurantsEndpoint =
+          uri?.host.toLowerCase() == "selfpos.sirixo.com" &&
+              uri?.path.toLowerCase() == "/api/all-restaurants";
+      if (isDeprecatedRestaurantsEndpoint) continue;
       try {
         final res = await dio.get(endpoint);
         if ((res.statusCode ?? 0) >= 400) continue;
@@ -100,7 +121,7 @@ class DeviceBootstrap {
       final aIsNumeric = RegExp(r'^\d+$').hasMatch(a);
       final bIsNumeric = RegExp(r'^\d+$').hasMatch(b);
       if (aIsNumeric == bIsNumeric) return 0;
-      return aIsNumeric ? -1 : 1;
+      return aIsNumeric ? 1 : -1;
     });
     return keys;
   }
@@ -157,6 +178,9 @@ class DeviceBootstrap {
     // 3️⃣ TRY GET TOKEN
     // =========================================================
     for (final deviceId in uniqueDeviceIds) {
+      if (!_shouldProbeExistingToken(prefs, deviceId)) {
+        continue;
+      }
       try {
         final res = await dio.get("kiosks/getToken/$deviceId");
         final token = res.data?["token"];
@@ -164,6 +188,7 @@ class DeviceBootstrap {
           await prefs.setString("auth_token", token.toString());
           await prefs.setString("device_uuid", deviceId);
           await prefs.setString("device_id", deviceId);
+          await prefs.setBool(_registeredDeviceKey(deviceId), true);
           return;
         }
       } catch (_) {
@@ -197,6 +222,7 @@ class DeviceBootstrap {
           await prefs.setString("auth_token", token.toString());
           await prefs.setString("device_uuid", deviceId);
           await prefs.setString("device_id", deviceId);
+          await prefs.setBool(_registeredDeviceKey(deviceId), true);
           return;
         } catch (e) {
           lastRegisterError = e;
@@ -293,11 +319,15 @@ class DeviceBootstrap {
 
     final endpoints = <String>[
       WebApiConfig.allRestaurantsUrl,
-      "https://selfpos.sirixo.com/api/all-restaurants",
       "https://gitam.sirixo.com/api/all-restaurants",
     ];
 
     for (final endpoint in endpoints) {
+      final uri = Uri.tryParse(endpoint);
+      final isDeprecatedRestaurantsEndpoint =
+          uri?.host.toLowerCase() == "selfpos.sirixo.com" &&
+              uri?.path.toLowerCase() == "/api/all-restaurants";
+      if (isDeprecatedRestaurantsEndpoint) continue;
       try {
         final response = await dio.get(endpoint);
         if ((response.statusCode ?? 0) >= 400) continue;

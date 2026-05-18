@@ -2,16 +2,17 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:dio/dio.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
+import 'package:api_selfxo_project/firebase_options.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
+import 'package:api_selfxo_project/screens/login_screen.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
-import 'package:api_selfxo_project/screens/register_screen.dart';
-import 'package:api_selfxo_project/screens/web_qr_menu_entry.dart';
 import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
@@ -71,7 +72,24 @@ class AppRouteObserver extends NavigatorObserver {
 Future<void> main() async {
   await runZonedGuarded<Future<void>>(() async {
     WidgetsFlutterBinding.ensureInitialized();
-    await initializeKioskBackgroundService();
+    if (kIsWeb) {
+      debugPrint("[FIREBASE] Initializing web Firebase app.");
+      try {
+        await Firebase.initializeApp(
+          options: DefaultFirebaseOptions.currentPlatform,
+        );
+      } on FirebaseException catch (e) {
+        if (e.code != "duplicate-app") rethrow;
+        debugPrint("[FIREBASE] Web Firebase app already initialized.");
+      }
+      debugPrint(
+        "[FIREBASE] Initialized project=${Firebase.app().options.projectId} "
+        "authDomain=${Firebase.app().options.authDomain}",
+      );
+    }
+    if (!kIsWeb) {
+      await initializeKioskBackgroundService();
+    }
     // Send an early heartbeat so the background watchdog doesn't relaunch
     // the app during cold start.
     sendUiHeartbeat();
@@ -79,18 +97,77 @@ Future<void> main() async {
       FlutterError.presentError(details);
       reportUiCrash(details.exception, details.stack ?? StackTrace.current);
     };
+    ErrorWidget.builder = (details) {
+      debugPrint("[FLUTTER][FATAL_WIDGET] ${details.exceptionAsString()}");
+      return Material(
+        color: const Color(0xFFF6F6F7),
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.error_outline_rounded,
+                      color: Color(0xFF9F342C),
+                      size: 34,
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      "Unable to open this screen",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Color(0xFF151518),
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      "Please refresh and try again.",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.grey.shade700,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    };
     PlatformDispatcher.instance.onError = (error, stack) {
       reportUiCrash(error, stack);
       return true;
     };
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    SystemChrome.setPreferredOrientations(const [
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-    ]);
+    if (!kIsWeb) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+      ]);
+    }
     PaintingBinding.instance.imageCache.maximumSizeBytes = 120 << 20; // 120MB
     PaintingBinding.instance.imageCache.maximumSize = 300;
-    WakelockPlus.enable();
+    if (kIsWeb) {
+      runApp(
+        ChangeNotifierProvider(
+          create: (_) => RestaurantProvider(),
+          child: const WebCustomerApp(),
+        ),
+      );
+      return;
+    }
+    if (!kIsWeb) {
+      WakelockPlus.enable();
+    }
     final prefs = await SharedPreferences.getInstance();
     final restaurantId = prefs.getString("restaurant_id");
     final setupDone = prefs.getBool("kiosk_setup_done") ?? false;
@@ -116,48 +193,35 @@ Future<void> main() async {
 }
 
 Widget _resolveInitialWebHome() {
-  final uri = Uri.base;
-  final restaurantId = _extractWebRestaurantId(uri);
-  final orderType = uri.queryParameters["order_type"] ??
-      uri.queryParameters["orderType"] ??
-      uri.queryParameters["type"];
-
-  if (restaurantId != null && restaurantId.isNotEmpty) {
-    return WebQrMenuEntryScreen(
-      restaurantId: restaurantId,
-      requestedOrderType: orderType,
-    );
-  }
-
-  return const UserIdScreen();
+  return const FoodOtpLoginScreen();
 }
 
-String? _extractWebRestaurantId(Uri uri) {
-  final segments = uri.pathSegments
-      .map((segment) => segment.trim())
-      .where((segment) => segment.isNotEmpty)
-      .toList();
+class WebCustomerApp extends StatefulWidget {
+  const WebCustomerApp({super.key});
 
-  for (var i = 0; i < segments.length - 1; i++) {
-    final current = segments[i].toLowerCase();
-    if (current == "restaurant" ||
-        current == "restaurants" ||
-        current == "menu" ||
-        current == "kiosk") {
-      final next = segments[i + 1].trim();
-      if (next.isNotEmpty) return next;
-    }
+  @override
+  State<WebCustomerApp> createState() => _WebCustomerAppState();
+}
+
+class _WebCustomerAppState extends State<WebCustomerApp> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      sendUiReady();
+    });
   }
 
-  final queryRestaurant = uri.queryParameters["restaurant_id"] ??
-      uri.queryParameters["restaurantId"] ??
-      uri.queryParameters["restaurant"] ??
-      uri.queryParameters["slug"];
-  if (queryRestaurant != null && queryRestaurant.trim().isNotEmpty) {
-    return queryRestaurant.trim();
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      navigatorKey: rootNavigatorKey,
+      scaffoldMessengerKey: rootScaffoldMessengerKey,
+      navigatorObservers: [appRouteObserver],
+      debugShowCheckedModeBanner: false,
+      home: _resolveInitialWebHome(),
+    );
   }
-
-  return null;
 }
 
 class MyApp extends StatefulWidget {
@@ -182,7 +246,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   Timer? _serviceHeartbeatTimer;
   bool _tickersEnabled = true;
   bool _isExitingFromRemoteBack = false;
-  late final KioskWatchdog _watchdog;
+  KioskWatchdog? _watchdog;
   final FocusNode _appFocusNode = FocusNode(debugLabel: 'app-root');
   final StringBuffer _globalScanBuffer = StringBuffer();
   Timer? _globalScanIdleTimer;
@@ -208,30 +272,37 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _resetIdleTimer();
-    _startServiceHeartbeat();
 
     ConnectivityService.instance.start();
     _idleListener = _handleIdleState;
     IdleTimer.enabled.addListener(_idleListener);
 
-    _watchdog = KioskWatchdog(
-      onFreezeDetected: _handleFreezeDetected,
-      onJankDetected: (_) {},
-    );
-    _watchdog.start();
+    if (!kIsWeb) {
+      _startServiceHeartbeat();
+      _watchdog = KioskWatchdog(
+        onFreezeDetected: _handleFreezeDetected,
+        onJankDetected: (_) {},
+      )..start();
+    }
     _globalHardwareKeyHandler = _handleGlobalHardwareKeyEvent;
-    HardwareKeyboard.instance.addHandler(_globalHardwareKeyHandler);
+    if (!kIsWeb) {
+      HardwareKeyboard.instance.addHandler(_globalHardwareKeyHandler);
+    }
 
-    KioskMemoryService.instance.start(
-      cacheClearInterval: KioskConfig.memoryCacheClearInterval,
-      maintenanceInterval: KioskConfig.maintenanceInterval,
-      mediaRefreshInterval: KioskConfig.mediaRefreshInterval,
-      activityCooldown: KioskConfig.activityCooldown,
-    );
+    if (!kIsWeb) {
+      KioskMemoryService.instance.start(
+        cacheClearInterval: KioskConfig.memoryCacheClearInterval,
+        maintenanceInterval: KioskConfig.maintenanceInterval,
+        mediaRefreshInterval: KioskConfig.mediaRefreshInterval,
+        activityCooldown: KioskConfig.activityCooldown,
+      );
+    }
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      KioskPower.requestIgnoreBatteryOptimizations();
-    });
+    if (!kIsWeb) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        KioskPower.requestIgnoreBatteryOptimizations();
+      });
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       sendUiReady();
@@ -267,9 +338,11 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     _heartbeatTimer?.cancel();
     _serviceHeartbeatTimer?.cancel();
     _globalScanIdleTimer?.cancel();
-    HardwareKeyboard.instance.removeHandler(_globalHardwareKeyHandler);
-    _watchdog.stop();
-    KioskMemoryService.instance.stop();
+    if (!kIsWeb) {
+      HardwareKeyboard.instance.removeHandler(_globalHardwareKeyHandler);
+      KioskMemoryService.instance.stop();
+    }
+    _watchdog?.stop();
     WidgetsBinding.instance.removeObserver(this);
     _appFocusNode.dispose();
     super.dispose();
@@ -290,8 +363,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
             autofocus: true,
             onKeyEvent: (node, event) {
               _resetIdleTimer();
-              _watchdog.reportUserActivity();
-              KioskMemoryService.instance.reportUserActivity();
+              _watchdog?.reportUserActivity();
+              if (!kIsWeb) {
+                KioskMemoryService.instance.reportUserActivity();
+              }
               if (_isRemoteBackKey(event)) {
                 unawaited(_handleSystemBackPress());
                 return KeyEventResult.handled;
@@ -302,20 +377,26 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               behavior: HitTestBehavior.translucent,
               onPointerDown: (_) {
                 _resetIdleTimer();
-                _watchdog.reportUserActivity();
-                KioskMemoryService.instance.reportUserActivity();
+                _watchdog?.reportUserActivity();
+                if (!kIsWeb) {
+                  KioskMemoryService.instance.reportUserActivity();
+                }
                 FocusManager.instance.primaryFocus?.unfocus();
               },
               onPointerMove: (_) {
                 _resetIdleTimer();
-                _watchdog.reportUserActivity();
-                KioskMemoryService.instance.reportUserActivity();
+                _watchdog?.reportUserActivity();
+                if (!kIsWeb) {
+                  KioskMemoryService.instance.reportUserActivity();
+                }
                 FocusManager.instance.primaryFocus?.unfocus();
               },
               onPointerSignal: (_) {
                 _resetIdleTimer();
-                _watchdog.reportUserActivity();
-                KioskMemoryService.instance.reportUserActivity();
+                _watchdog?.reportUserActivity();
+                if (!kIsWeb) {
+                  KioskMemoryService.instance.reportUserActivity();
+                }
                 FocusManager.instance.primaryFocus?.unfocus();
               },
               child: child ?? const SizedBox.shrink(),
@@ -568,8 +649,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   Future<void> _handleSystemBackPress() async {
     _resetIdleTimer();
-    _watchdog.reportUserActivity();
-    KioskMemoryService.instance.reportUserActivity();
+    _watchdog?.reportUserActivity();
+    if (!kIsWeb) {
+      KioskMemoryService.instance.reportUserActivity();
+    }
 
     final nav = rootNavigatorKey.currentState;
     if (nav != null && nav.canPop()) {
@@ -608,7 +691,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     }
 
     _resetIdleTimer();
-    _watchdog.reportUserActivity();
+    _watchdog?.reportUserActivity();
     KioskMemoryService.instance.reportUserActivity();
 
     if (_isRemoteBackKey(event)) {
@@ -1232,11 +1315,12 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (kIsWeb) return;
     if (state == AppLifecycleState.resumed) {
       _resetIdleTimer();
       _tickersEnabled = true;
       WakelockPlus.enable();
-      _watchdog.start();
+      _watchdog?.start();
       KioskMemoryService.instance.resume();
       _startServiceHeartbeat();
       if (mounted) setState(() {});
@@ -1244,7 +1328,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         state == AppLifecycleState.inactive) {
       _idleTimer?.cancel();
       _tickersEnabled = false;
-      _watchdog.stop();
+      _watchdog?.stop();
       KioskMemoryService.instance.pause();
       if (mounted) setState(() {});
     }

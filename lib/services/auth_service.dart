@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AuthService {
   static const bool _enableAuthLogs = true;
   static String? _lastFailureReason;
+  static Future<bool>? _inFlightInitialize;
 
   static String? get lastFailureReason => _lastFailureReason;
 
@@ -45,6 +46,20 @@ class AuthService {
         id.startsWith("unknown_ios_");
   }
 
+  String _registeredDeviceKey(String deviceId) {
+    return "kiosk_registered_device_$deviceId";
+  }
+
+  bool _isWebGeneratedDeviceId(String deviceId) {
+    final id = deviceId.trim().toLowerCase();
+    return id.startsWith("web_") || id.startsWith("web_base_");
+  }
+
+  bool _shouldProbeExistingToken(SharedPreferences prefs, String deviceId) {
+    if (!_isWebGeneratedDeviceId(deviceId)) return true;
+    return prefs.getBool(_registeredDeviceKey(deviceId)) ?? false;
+  }
+
   Future<List<String>> _candidateDeviceIds({
     required SharedPreferences prefs,
     required String restaurantId,
@@ -79,9 +94,13 @@ class AuthService {
     final endpoints = <String>[
       WebApiConfig.allRestaurantsUrl,
       "https://gitam.sirixo.com/api/all-restaurants",
-      "https://selfpos.sirixo.com/api/all-restaurants",
     ];
     for (final endpoint in endpoints) {
+      final uri = Uri.tryParse(endpoint);
+      final isDeprecatedRestaurantsEndpoint =
+          uri?.host.toLowerCase() == "selfpos.sirixo.com" &&
+              uri?.path.toLowerCase() == "/api/all-restaurants";
+      if (isDeprecatedRestaurantsEndpoint) continue;
       try {
         final res = await dio.get(endpoint);
         if ((res.statusCode ?? 0) >= 400) continue;
@@ -148,17 +167,36 @@ class AuthService {
       break;
     }
 
-    // Preserve deterministic preference: numeric id before hash-like keys.
+    // The kiosk register endpoint accepts restaurant slugs/hashes more reliably
+    // than numeric ids on the web backend, so try hash-like keys first and keep
+    // numeric ids as fallback.
     keys.sort((a, b) {
       final aIsNumeric = RegExp(r'^\d+$').hasMatch(a);
       final bIsNumeric = RegExp(r'^\d+$').hasMatch(b);
       if (aIsNumeric == bIsNumeric) return 0;
-      return aIsNumeric ? -1 : 1;
+      return aIsNumeric ? 1 : -1;
     });
     return keys;
   }
 
-  Future<bool> initializeKiosk({bool force = false}) async {
+  Future<bool> initializeKiosk({bool force = false}) {
+    final running = _inFlightInitialize;
+    if (running != null) {
+      _log("initializeKiosk already running; waiting for existing attempt");
+      return running;
+    }
+
+    final future = _initializeKiosk(force: force);
+    _inFlightInitialize = future;
+    future.whenComplete(() {
+      if (identical(_inFlightInitialize, future)) {
+        _inFlightInitialize = null;
+      }
+    });
+    return future;
+  }
+
+  Future<bool> _initializeKiosk({required bool force}) async {
     try {
       _lastFailureReason = null;
       final prefs = await SharedPreferences.getInstance();
@@ -177,6 +215,7 @@ class AuthService {
         _setFailure("Restaurant key resolution failed");
         return false;
       }
+      final scopedTokenKey = _scopedAuthTokenKey(registrationRestaurantKeys);
       _log("initializeKiosk(force: $force) restaurant_id=$restaurantId");
       _log(
         "register payload restaurant_keys=$registrationRestaurantKeys "
@@ -199,17 +238,27 @@ class AuthService {
         await prefs.remove("auth_token");
       }
 
-      if (!force) {
-        final token = prefs.getString("auth_token");
-        if (token != null && token.isNotEmpty) {
-          _log("✅ Using existing kiosk token");
-          return true;
-        }
+      final scopedToken = prefs.getString(scopedTokenKey)?.trim() ?? "";
+      if (scopedToken.isNotEmpty) {
+        await prefs.setString("auth_token", scopedToken);
+        _log("✅ Using scoped cached kiosk token");
+        return true;
+      }
+
+      final token = prefs.getString("auth_token")?.trim() ?? "";
+      if (!force && token.isNotEmpty) {
+        await prefs.setString(scopedTokenKey, token);
+        _log("✅ Using existing kiosk token");
+        return true;
       }
 
       final dio = DioClient.getDio();
 
       for (final deviceId in deviceIds) {
+        if (!_shouldProbeExistingToken(prefs, deviceId)) {
+          _log("Skipping getToken probe for new web device_id=$deviceId");
+          continue;
+        }
         final tokenRecovered = await _fetchExistingToken(deviceId);
         if (tokenRecovered) {
           await prefs.setString("device_uuid", deviceId);
@@ -247,8 +296,10 @@ class AuthService {
             }
 
             await prefs.setString("auth_token", token.toString());
+            await prefs.setString(scopedTokenKey, token.toString());
             await prefs.setString("device_uuid", deviceId);
             await prefs.setString("device_id", deviceId);
+            await prefs.setBool(_registeredDeviceKey(deviceId), true);
             _lastFailureReason = null;
             _log("✅ Kiosk registered & token saved");
             return true;
@@ -302,18 +353,32 @@ class AuthService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final dio = DioClient.getDio();
+      final timer = Stopwatch()..start();
       _log("fetch existing token for device_id=$deviceId");
 
       final res = await dio.get("kiosks/getToken/$deviceId");
-      _log("getToken response status=${res.statusCode} body=${res.data}");
+      timer.stop();
+      _log(
+        "getToken response status=${res.statusCode} "
+        "duration=${timer.elapsedMilliseconds}ms body=${res.data}",
+      );
+      if (res.statusCode == 404) {
+        _log("No existing kiosk token for device_id=$deviceId");
+        return false;
+      }
       final token = res.data?["token"];
 
       if (token == null || token.toString().isEmpty) {
-        _setFailure("Failed to fetch existing token");
+        _log("Existing token response did not include token");
         return false;
       }
 
       await prefs.setString("auth_token", token.toString());
+      final scopedKey = _scopedAuthTokenKeyFromPrefs(prefs);
+      if (scopedKey != null) {
+        await prefs.setString(scopedKey, token.toString());
+      }
+      await prefs.setBool(_registeredDeviceKey(deviceId), true);
       _lastFailureReason = null;
       _log("✅ Existing kiosk token refreshed");
       return true;
@@ -321,5 +386,19 @@ class AuthService {
       _setFailure("TOKEN FETCH ERROR: $e");
       return false;
     }
+  }
+
+  String _scopedAuthTokenKey(List<String> restaurantKeys) {
+    final key = restaurantKeys.first.trim().toLowerCase();
+    final safeKey = key.replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
+    return "auth_token_restaurant_$safeKey";
+  }
+
+  String? _scopedAuthTokenKeyFromPrefs(SharedPreferences prefs) {
+    final hash = prefs.getString("restaurant_hash")?.trim();
+    final id = prefs.getString("restaurant_id")?.trim();
+    final key = (hash != null && hash.isNotEmpty) ? hash : id;
+    if (key == null || key.isEmpty) return null;
+    return _scopedAuthTokenKey([key]);
   }
 }

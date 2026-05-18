@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
+import 'package:api_selfxo_project/core/device_layout.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/printer/printer_s.dart';
@@ -975,11 +976,12 @@ class _PaymentSuccessDialogState extends State<PaymentSuccessDialog>
     final String safeOrderType = (widget.orderType?.trim().isNotEmpty ?? false)
         ? widget.orderType!
         : "dine_in";
+    final bool isTablet = !kIsWeb && isTabletContext(context);
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(
-        builder: (_) => kIsWeb
-            ? MainNavigation(orderType: safeOrderType)
-            : const AdminHomeScreen(),
+        builder: (_) => isTablet
+            ? const AdminHomeScreen()
+            : MainNavigation(orderType: safeOrderType),
       ),
       (_) => false,
     );

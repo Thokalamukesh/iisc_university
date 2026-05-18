@@ -1,5 +1,6 @@
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:api_selfxo_project/services/restaurant_api_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -130,9 +131,7 @@ class RestaurantProvider extends ChangeNotifier {
     bool forceRefresh = false,
   }) async {
     try {
-      return await KioskApi()
-          .getAllRestaurantsWeb(forceRefresh: forceRefresh)
-          .timeout(const Duration(seconds: 15));
+      return await KioskApi().getAllRestaurantsWeb(forceRefresh: forceRefresh);
     } catch (e, stackTrace) {
       kioskLogError(
         'Restaurant load failed: $e',
@@ -140,8 +139,16 @@ class RestaurantProvider extends ChangeNotifier {
         error: e,
         stackTrace: stackTrace,
       );
+      _errorMessage = _restaurantLoadErrorMessage(e);
       return const [];
     }
+  }
+
+  String _restaurantLoadErrorMessage(Object error) {
+    if (error is RestaurantApiException) {
+      return error.message;
+    }
+    return "Unable to load restaurants. Please try again.";
   }
 
   String? _resolveFallbackRestaurantId() {

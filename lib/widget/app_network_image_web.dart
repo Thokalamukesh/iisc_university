@@ -1,10 +1,12 @@
-// ignore_for_file: undefined_prefixed_name
+// ignore_for_file: avoid_web_libraries_in_flutter, undefined_prefixed_name
 
 import 'dart:async';
 import 'dart:html' as html;
 import 'dart:ui_web' as ui_web;
 
+import 'package:api_selfxo_project/core/local_image_asset.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 int _nextNetworkImageId = 0;
 
@@ -17,6 +19,7 @@ class AppNetworkImage extends StatefulWidget {
   final int? cacheWidth;
   final int? cacheHeight;
   final Widget fallback;
+  final List<String> fallbackUrls;
   final bool gaplessPlayback;
 
   const AppNetworkImage({
@@ -30,6 +33,7 @@ class AppNetworkImage extends StatefulWidget {
     this.cacheWidth,
     this.cacheHeight,
     this.gaplessPlayback = false,
+    this.fallbackUrls = const [],
   });
 
   @override
@@ -43,6 +47,14 @@ class _AppNetworkImageState extends State<AppNetworkImage> {
   StreamSubscription<html.Event>? _errorSub;
   bool _hasError = false;
   bool _disposed = false;
+  int _activeUrlIndex = 0;
+  List<String> get _candidateUrls {
+    final seen = <String>{};
+    return <String>[widget.url, ...widget.fallbackUrls]
+        .map((url) => url.trim())
+        .where((url) => url.isNotEmpty && seen.add(url))
+        .toList();
+  }
 
   @override
   void initState() {
@@ -51,15 +63,17 @@ class _AppNetworkImageState extends State<AppNetworkImage> {
     _imageElement = html.ImageElement();
     _bindEvents();
     _updateImageElement();
-    ui_web.platformViewRegistry.registerViewFactory(_viewType, (int viewId) {
-      return _imageElement;
-    });
+    ui_web.platformViewRegistry.registerViewFactory(
+      _viewType,
+      (int viewId) => _imageElement,
+    );
   }
 
   @override
   void didUpdateWidget(covariant AppNetworkImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.url != widget.url ||
+        oldWidget.fallbackUrls.join('|') != widget.fallbackUrls.join('|') ||
         oldWidget.fit != widget.fit ||
         oldWidget.alignment != widget.alignment) {
       _updateImageElement();
@@ -75,18 +89,32 @@ class _AppNetworkImageState extends State<AppNetworkImage> {
     });
     _errorSub = _imageElement.onError.listen((_) {
       if (!mounted || _disposed) return;
+      if (_tryNextUrl()) return;
       setState(() => _hasError = true);
     });
   }
 
   void _updateImageElement() {
     if (_disposed) return;
-    final url = widget.url.trim();
-    _hasError = url.isEmpty;
+
+    _activeUrlIndex = 0;
+    final candidates = _candidateUrls;
+    final trimmedUrl = candidates.isEmpty ? '' : candidates.first;
+    _hasError = trimmedUrl.isEmpty;
+
+    if (trimmedUrl.isEmpty || localImageAssetForUrl(trimmedUrl) != null) {
+      _imageElement.src = '';
+      return;
+    }
+
     _imageElement
-      ..src = url
+      ..src = trimmedUrl
       ..alt = ''
       ..draggable = false
+      // Let the browser lazily decode off-screen menu images. This reduces
+      // route-change jank when a category list has many product photos.
+      ..setAttribute('loading', 'lazy')
+      ..setAttribute('decoding', 'async')
       ..style.width = '100%'
       ..style.height = '100%'
       ..style.border = '0'
@@ -97,6 +125,14 @@ class _AppNetworkImageState extends State<AppNetworkImage> {
       ..style.userSelect = 'none'
       ..style.objectFit = _cssFit(widget.fit)
       ..style.objectPosition = _cssAlignment(widget.alignment);
+  }
+
+  bool _tryNextUrl() {
+    final candidates = _candidateUrls;
+    if (_activeUrlIndex >= candidates.length - 1) return false;
+    _activeUrlIndex++;
+    _imageElement.src = candidates[_activeUrlIndex];
+    return true;
   }
 
   String _cssFit(BoxFit fit) {
@@ -135,9 +171,38 @@ class _AppNetworkImageState extends State<AppNetworkImage> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.url.trim().isEmpty || _hasError) {
-      return widget.fallback;
+    final candidates = _candidateUrls;
+    final trimmedUrl = candidates.isEmpty ? '' : candidates.first;
+    if (trimmedUrl.isEmpty) return widget.fallback;
+
+    final localAsset = localImageAssetForUrl(trimmedUrl);
+    if (localAsset != null) {
+      if (localAsset.isSvg) {
+        return SvgPicture.asset(
+          localAsset.path,
+          fit: widget.fit,
+          alignment: widget.alignment,
+          width: widget.width,
+          height: widget.height,
+          placeholderBuilder: (_) => widget.fallback,
+        );
+      }
+
+      return Image.asset(
+        localAsset.path,
+        fit: widget.fit,
+        alignment: widget.alignment,
+        width: widget.width,
+        height: widget.height,
+        cacheWidth: widget.cacheWidth,
+        cacheHeight: widget.cacheHeight,
+        gaplessPlayback: widget.gaplessPlayback,
+        errorBuilder: (_, __, ___) => widget.fallback,
+      );
     }
+
+    if (_hasError) return widget.fallback;
+
     return SizedBox(
       width: widget.width,
       height: widget.height,

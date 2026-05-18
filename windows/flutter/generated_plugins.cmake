@@ -6,6 +6,8 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   charset_converter
   connectivity_plus
+  firebase_auth
+  firebase_core
   flutter_tts
   url_launcher_windows
 )

@@ -3,10 +3,13 @@ import 'dart:ui';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:api_selfxo_project/core/device_layout.dart';
+import 'package:api_selfxo_project/core/fast_page_route.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
-import 'package:api_selfxo_project/screens/register_screen.dart';
+import 'package:api_selfxo_project/screens/block_screen.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 import 'home_page2.dart';
 import 'cart_page.dart';
 
@@ -27,6 +30,7 @@ class _MainNavigationState extends State<MainNavigation>
   List<Map<String, dynamic>> cart = [];
   List<Map<String, dynamic>> recommendedProducts = [];
   List<dynamic> _productsRaw = [];
+  String _productsSignature = "";
   final Map<int, int> _takeAwayChargeById = {};
   Set<int> _cartIdSet() => cart
       .map((e) => int.tryParse(e["id"].toString()) ?? 0)
@@ -54,6 +58,21 @@ class _MainNavigationState extends State<MainNavigation>
       if (wanted.contains(nk)) return entry.value;
     }
     return null;
+  }
+
+  String _buildProductsSignature(List<dynamic> products) {
+    if (products.isEmpty) return "0";
+    final buffer = StringBuffer("${products.length}:");
+    for (final item in products.take(20)) {
+      if (item is Map) {
+        buffer
+          ..write(item["id"] ?? item["product_id"] ?? "")
+          ..write("|")
+          ..write(item["updated_at"] ?? item["price"] ?? "")
+          ..write(",");
+      }
+    }
+    return buffer.toString();
   }
 
   void _rebuildTakeAwayChargeMap(List<dynamic> raw) {
@@ -121,29 +140,29 @@ class _MainNavigationState extends State<MainNavigation>
       return int.tryParse(value?.toString() ?? "") ?? 0;
     }
 
-    String _normKey(String k) =>
+    String normKey(String k) =>
         k.toLowerCase().replaceAll(RegExp(r"[^a-z0-9]"), "");
 
-    dynamic _readKey(Map<String, dynamic>? item, List<String> keys) {
+    dynamic readNestedKey(Map<String, dynamic>? item, List<String> keys) {
       if (item == null) return null;
       for (final key in keys) {
         if (item.containsKey(key)) return item[key];
       }
-      final wanted = keys.map(_normKey).toSet();
+      final wanted = keys.map(normKey).toSet();
       for (final entry in item.entries) {
-        final nk = _normKey(entry.key.toString());
+        final nk = normKey(entry.key.toString());
         if (wanted.contains(nk)) return entry.value;
       }
       return null;
     }
 
     int resolveItemId(Map<String, dynamic> item, Map<String, dynamic>? nested) {
-      final direct = _readKey(
+      final direct = readNestedKey(
         item,
         ["id", "Id", "ID", "item_id", "itemId", "itemId"],
       );
       if (direct != null) return toInt(direct);
-      final nestedId = _readKey(
+      final nestedId = readNestedKey(
         nested,
         ["id", "Id", "ID", "item_id", "itemId", "itemId"],
       );
@@ -166,23 +185,23 @@ class _MainNavigationState extends State<MainNavigation>
           .toList();
 
       for (final item in items) {
-        final nested = _readKey(
+        final nested = readNestedKey(
           item,
           ["item", "menu_item", "product", "details"],
         );
         final nestedMap =
             nested is Map ? Map<String, dynamic>.from(nested) : null;
-        final avail = _readKey(
+        final avail = readNestedKey(
               item,
               ["is_available", "isAvailable", "available", "isAvailableNow"],
             ) ??
-            _readKey(
+            readNestedKey(
               nestedMap,
               ["is_available", "isAvailable", "available", "isAvailableNow"],
             );
         final bool isAvailable = avail == null || isTruthy(avail);
         if (!isAvailable) continue;
-        final rec = _readKey(
+        final rec = readNestedKey(
               item,
               [
                 "is_recommended",
@@ -192,7 +211,7 @@ class _MainNavigationState extends State<MainNavigation>
                 "is_recommanded",
               ],
             ) ??
-            _readKey(
+            readNestedKey(
               nestedMap,
               [
                 "is_recommended",
@@ -482,9 +501,27 @@ class _MainNavigationState extends State<MainNavigation>
   }
 
   void restartHomePage() {
+    setState(() {
+      cart.clear();
+      displayedItems = 0;
+      displayedPrice = 0;
+      bounceActive = false;
+      if (_viewCartController.isAnimating) {
+        _viewCartController.stop(canceled: true);
+        _viewCartController.reset();
+      }
+    });
+
     if (kIsWeb) {
+      Navigator.of(context, rootNavigator: true).push(
+        fastPageRoute((_) => const CustomerBlockScreen()),
+      );
+      return;
+    }
+
+    if (!isTabletContext(context)) {
       Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const UserIdScreen()),
+        fastPageRoute((_) => const CustomerBlockScreen()),
         (_) => false,
       );
       return;
@@ -721,12 +758,13 @@ class _MainNavigationState extends State<MainNavigation>
               top: y - size / 2,
               child: Opacity(
                 opacity: opacity,
-                child: Image.network(
-                  normalizedImageUrl,
+                child: AppNetworkImage(
+                  url: normalizedImageUrl,
                   width: size,
                   height: size,
                   cacheWidth: cacheSize,
                   cacheHeight: cacheSize,
+                  fallback: const SizedBox.shrink(),
                 ),
               ),
             );
@@ -736,12 +774,6 @@ class _MainNavigationState extends State<MainNavigation>
     );
 
     final overlay = Overlay.of(context);
-    if (overlay == null) {
-      _flyController?.dispose();
-      _flyController = null;
-      _flyAnim = null;
-      return;
-    }
     overlay.insert(_overlayEntry!);
 
     final duration =
@@ -788,81 +820,90 @@ class _MainNavigationState extends State<MainNavigation>
         children: [
           // 1. THE MAIN CONTENT (HomePage or CartPage)
           Expanded(
-            child: IndexedStack(
-              index: currentIndex,
-              children: [
-                HomePage2(
-                  key: homeKey,
-                  onRestart: restartHomePage,
-                  onViewCart: () => setState(() => currentIndex = 1),
-                  onClearCart: _clearAllPopup,
-                  onCartIconRect: (rect) => _cartIconRect = rect,
-                  isActive: currentIndex == 0,
-                  showBottomBar: false,
-                  onAddToCart: (
-                    int id,
-                    String name,
-                    String category,
-                    int price,
-                    String image,
-                    int qty,
-                    Map<String, dynamic>? variation,
-                    List<Map<String, dynamic>> modifiers,
-                    Rect? imageRect,
-                  ) {
-                    _handleAddToCart(
-                      id,
-                      name,
-                      category,
-                      price,
-                      image,
-                      qty,
-                      variation,
-                      modifiers,
-                      imageRect,
-                    );
-                  },
-                  onProductsLoaded: (List<dynamic> p1) {
-                    setState(
-                      () {
-                        _productsRaw = p1;
-                        _rebuildTakeAwayChargeMap(p1);
+            child: RepaintBoundary(
+              // IndexedStack keeps Home and Cart alive so tab changes do not
+              // fetch products again. RepaintBoundary also keeps cart updates
+              // from repainting the whole menu surface on web.
+              child: IndexedStack(
+                index: currentIndex,
+                children: [
+                  HomePage2(
+                    key: homeKey,
+                    onRestart: restartHomePage,
+                    onViewCart: () => setState(() => currentIndex = 1),
+                    onClearCart: _clearAllPopup,
+                    onCartIconRect: (rect) => _cartIconRect = rect,
+                    isActive: currentIndex == 0,
+                    showBottomBar: false,
+                    onAddToCart: (
+                      int id,
+                      String name,
+                      String category,
+                      int price,
+                      String image,
+                      int qty,
+                      Map<String, dynamic>? variation,
+                      List<Map<String, dynamic>> modifiers,
+                      Rect? imageRect,
+                    ) {
+                      _handleAddToCart(
+                        id,
+                        name,
+                        category,
+                        price,
+                        image,
+                        qty,
+                        variation,
+                        modifiers,
+                        imageRect,
+                      );
+                    },
+                    onProductsLoaded: (List<dynamic> p1) {
+                      final signature = _buildProductsSignature(p1);
+                      if (signature == _productsSignature) return;
+                      setState(
+                        () {
+                          _productsSignature = signature;
+                          _productsRaw = p1;
+                          _rebuildTakeAwayChargeMap(p1);
+                          _refreshRecommendations();
+                        },
+                      );
+                    },
+                    getQtyForProduct: getQtyForProduct,
+                    cart: cart,
+                  ),
+                  CartPage(
+                    cart: cart,
+                    recommendedProducts: recommendedProducts,
+                    isActive: currentIndex == 1,
+                    orderType: widget.orderType,
+                    onAddRecommended: _handleAddToCart,
+                    onBack: () => setState(() => currentIndex = 0),
+                    onStartOver: restartHomePage,
+                    onCartUpdated: () {
+                      setState(() {
                         _refreshRecommendations();
-                      },
-                    );
-                  },
-                  getQtyForProduct: getQtyForProduct,
-                  cart: cart, // ✅ Passed current cart
-                ),
-                CartPage(
-                  cart: cart,
-                  recommendedProducts: recommendedProducts,
-                  isActive: currentIndex == 1,
-                  orderType: widget.orderType,
-                  onAddRecommended: _handleAddToCart,
-                  onBack: () => setState(() => currentIndex = 0),
-                  onCartUpdated: () {
-                    setState(() {
-                      _refreshRecommendations();
-                      displayedItems = cart.fold(
-                        0,
-                        (s, i) => s + _asInt(i["qty"]),
-                      );
-                      displayedPrice = cart.fold(
-                        0,
-                        (s, i) => s + (_asInt(i["qty"]) * _asInt(i["price"])),
-                      );
-                      if (displayedItems == 0) {
-                        bounceActive = false;
-                        if (_viewCartController.isAnimating) {
-                          _viewCartController.stop(canceled: true);
-                          _viewCartController.reset();
+                        displayedItems = cart.fold(
+                          0,
+                          (s, i) => s + _asInt(i["qty"]),
+                        );
+                        displayedPrice = cart.fold(
+                          0,
+                          (s, i) => s + (_asInt(i["qty"]) * _asInt(i["price"])),
+                        );
+                        if (displayedItems == 0) {
+                          bounceActive = false;
+                          if (_viewCartController.isAnimating) {
+                            _viewCartController.stop(canceled: true);
+                            _viewCartController.reset();
+                          }
                         }
-                      }
-                    });
-                  },
-                ),
-              ],
+                      });
+                    },
+                  ),
+                ],
+              ),
             ),
           ),
         ],

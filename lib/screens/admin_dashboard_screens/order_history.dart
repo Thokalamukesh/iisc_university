@@ -9,6 +9,7 @@ import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
 
 class OrdersHistoryTab extends StatefulWidget {
@@ -488,14 +489,14 @@ class _OrdersHistoryTabState extends State<OrdersHistoryTab>
                   if (imageUrl != null && imageUrl.isNotEmpty)
                     ClipRRect(
                       borderRadius: BorderRadius.circular(10),
-                      child: Image.network(
-                        imageUrl,
+                      child: AppNetworkImage(
+                        url: imageUrl,
                         width: 40,
                         height: 40,
                         fit: BoxFit.cover,
                         cacheWidth: thumbCache,
                         cacheHeight: thumbCache,
-                        errorBuilder: (_, __, ___) => Container(
+                        fallback: Container(
                           width: 40,
                           height: 40,
                           color: Colors.grey.shade100,

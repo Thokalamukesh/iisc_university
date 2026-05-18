@@ -7,6 +7,7 @@ import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 
 import '../api/kiosk_api.dart';
 import '../screens/main_navigation.dart';
@@ -252,12 +253,12 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     key: ValueKey("banner-refresh-$_mediaRefreshKey"),
                     controller: _pageController,
                     itemCount: banners.length,
-                    itemBuilder: (_, i) => Image.network(
-                      banners[i],
+                    itemBuilder: (_, i) => AppNetworkImage(
+                      url: banners[i],
                       fit: BoxFit.cover,
                       cacheWidth: bannerCacheWidth,
                       cacheHeight: bannerCacheHeight,
-                      filterQuality: FilterQuality.low,
+                      fallback: Container(color: Colors.black),
                     ),
                   ),
           ),
@@ -321,7 +322,6 @@ class _WelcomeScreenState extends State<WelcomeScreen>
               ),
             ),
           ),
-
           Positioned(
             bottom: isTablet ? 80 : 40,
             left: isTablet ? 100 : 20,
@@ -415,7 +415,6 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             ),
           ),
           const SizedBox(height: 10),
-
           const SizedBox(height: 40),
           if (_showDineIn || _showPickup)
             Builder(
@@ -569,8 +568,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     final sources = [kioskSettings, restaurant];
     for (final src in sources) {
       if (src is! Map) continue;
-      final v =
-          src["gst_number"] ??
+      final v = src["gst_number"] ??
           src["gstin"] ??
           src["tax_id"] ??
           src["taxId"] ??
@@ -635,8 +633,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
               Navigator.pushReplacement(
                 context,
                 PageRouteBuilder(
-                  pageBuilder: (_, __, ___) =>
-                      MainNavigation(orderType: type),
+                  pageBuilder: (_, __, ___) => MainNavigation(orderType: type),
                   transitionDuration: Duration.zero,
                   reverseTransitionDuration: Duration.zero,
                 ),

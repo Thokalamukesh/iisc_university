@@ -1,5 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
+import 'package:api_selfxo_project/core/fast_page_route.dart';
 import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/core/kiosk_config.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
@@ -26,6 +28,7 @@ class CartPage extends StatefulWidget {
     Rect? imageRect,
   ) onAddRecommended;
   final VoidCallback onBack;
+  final VoidCallback onStartOver;
   final VoidCallback onCartUpdated;
 
   const CartPage({
@@ -36,6 +39,7 @@ class CartPage extends StatefulWidget {
     required this.orderType,
     required this.onAddRecommended,
     required this.onBack,
+    required this.onStartOver,
     required this.onCartUpdated,
   });
 
@@ -45,6 +49,8 @@ class CartPage extends StatefulWidget {
 
 class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
   static const Color kGreen = Color(0xFF9F342C);
+  static const Color _payGreen = Color(0xFF2F8F46);
+  static const Color _softSurface = Color(0xFFF7F8F6);
 
   // 🔴 GST SETTINGS
   final bool gstEnabled = true;
@@ -69,6 +75,13 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
   int _lastCartCount = 0;
   final ScrollController _cartScrollController = ScrollController();
   VoidCallback? _maintenanceListener;
+  OverlayEntry? _recommendedPopupEntry;
+  Timer? _recommendedPopupTimer;
+  Timer? _recommendedSheetDelayTimer;
+  BuildContext? _recommendedSheetContext;
+  bool _recommendedSheetShownForVisit = false;
+  bool _recommendedSheetOpen = false;
+
   @override
   void initState() {
     super.initState();
@@ -89,6 +102,10 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
     KioskMemoryService.instance.maintenanceTick.addListener(
       _maintenanceListener!,
     );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scheduleRecommendedSheetIfNeeded();
+    });
   }
 
   @override
@@ -101,15 +118,28 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
       _stopPayBounce();
     }
     _lastCartCount = count;
+
+    if (!widget.isActive || widget.cart.isEmpty) {
+      _recommendedSheetShownForVisit = false;
+      _cancelRecommendedSheetTimers();
+      _closeRecommendedSheetIfOpen();
+    } else if (!oldWidget.isActive && widget.isActive) {
+      _recommendedSheetShownForVisit = false;
+      _scheduleRecommendedSheetIfNeeded();
+    } else {
+      _scheduleRecommendedSheetIfNeeded();
+    }
   }
 
   @override
   void dispose() {
+    _removeRecommendedPopup();
+    _cancelRecommendedSheetTimers();
     if (_payController.isAnimating) {
       _payController.stop(canceled: true);
     }
     _payController.dispose();
-    _cartScrollController..dispose();
+    _cartScrollController.dispose();
     if (_maintenanceListener != null) {
       KioskMemoryService.instance.maintenanceTick.removeListener(
         _maintenanceListener!,
@@ -124,6 +154,73 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
       _payController.stop(canceled: true);
     }
     super.deactivate();
+  }
+
+  bool get _canShowRecommendedSheet {
+    return widget.isActive &&
+        mounted &&
+        !_recommendedSheetShownForVisit &&
+        !_recommendedSheetOpen &&
+        widget.cart.isNotEmpty &&
+        _filteredRecommendations().isNotEmpty;
+  }
+
+  void _scheduleRecommendedSheetIfNeeded() {
+    if (!_canShowRecommendedSheet) {
+      if (widget.cart.isEmpty || !widget.isActive) {
+        _recommendedSheetDelayTimer?.cancel();
+        _recommendedSheetDelayTimer = null;
+      }
+      return;
+    }
+    if (_recommendedSheetDelayTimer?.isActive ?? false) return;
+
+    _recommendedSheetDelayTimer = Timer(const Duration(seconds: 0), () {
+      _recommendedSheetDelayTimer = null;
+      if (!_canShowRecommendedSheet) return;
+      _showRecommendedAutoSheet();
+    });
+  }
+
+  void _cancelRecommendedSheetTimers() {
+    _recommendedSheetDelayTimer?.cancel();
+    _recommendedSheetDelayTimer = null;
+  }
+
+  void _closeRecommendedSheetIfOpen() {
+    if (!_recommendedSheetOpen) return;
+    final contextToClose = _recommendedSheetContext;
+    if (contextToClose == null) return;
+    final navigator = Navigator.maybeOf(contextToClose);
+    if (navigator?.canPop() == true) {
+      navigator!.pop();
+    }
+  }
+
+  Future<void> _showRecommendedAutoSheet() async {
+    if (!_canShowRecommendedSheet) return;
+    _recommendedSheetShownForVisit = true;
+    _recommendedSheetOpen = true;
+
+    final mediaSize = MediaQuery.of(context).size;
+    final isTablet = mediaSize.shortestSide >= 700;
+
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Colors.transparent,
+        barrierColor: Colors.black.withOpacity(0.22),
+        builder: (modalContext) {
+          _recommendedSheetContext = modalContext;
+          return _buildRecommendedAutoSheet(modalContext, isTablet);
+        },
+      );
+    } finally {
+      _recommendedSheetContext = null;
+      _recommendedSheetOpen = false;
+    }
   }
 
   void _startPayBounce() {
@@ -264,6 +361,94 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
       imageRect,
     );
     widget.onCartUpdated();
+    _showRecommendedAddedPopup(name);
+  }
+
+  void _removeRecommendedPopup() {
+    _recommendedPopupTimer?.cancel();
+    _recommendedPopupTimer = null;
+    _recommendedPopupEntry?.remove();
+    _recommendedPopupEntry = null;
+  }
+
+  void _showRecommendedAddedPopup(String name) {
+    if (!mounted) return;
+    _removeRecommendedPopup();
+    _recommendedPopupEntry = OverlayEntry(
+      builder: (context) {
+        final topInset = MediaQuery.of(context).padding.top;
+        return Positioned(
+          top: topInset + 12,
+          left: 12,
+          right: 12,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFEFE1),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFFEED8B8)),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x1F000000),
+                    blurRadius: 14,
+                    offset: Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  InkWell(
+                    onTap: _removeRecommendedPopup,
+                    borderRadius: BorderRadius.circular(12),
+                    child: const Padding(
+                      padding: EdgeInsets.all(2),
+                      child: Icon(
+                        Icons.close_rounded,
+                        size: 18,
+                        color: Color(0xFF7A4A2D),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  const Text(
+                    "Added from Recommended",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF5D3320),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    name.isEmpty ? "Item added to cart" : name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF7B5A44),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    final overlay = Overlay.of(context);
+    overlay.insert(_recommendedPopupEntry!);
+    _recommendedPopupTimer = Timer(
+      const Duration(seconds: 4),
+      _removeRecommendedPopup,
+    );
   }
 
   void _showStartOverDialog(BuildContext context) {
@@ -368,7 +553,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                           widget.cart.clear();
                           widget.onCartUpdated();
                           Navigator.pop(dialogContext);
-                          widget.onBack();
+                          widget.onStartOver();
                         },
                         child: Text(
                           "YES, CANCEL",
@@ -392,30 +577,33 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    final bool isTablet = MediaQuery.of(context).size.width > 600;
+    final mediaSize = MediaQuery.of(context).size;
+    final bool isTablet = mediaSize.shortestSide >= 700;
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F7F5),
+      backgroundColor: _softSurface,
       appBar: AppBar(
-        toolbarHeight: isTablet ? 100 : 80,
+        toolbarHeight: isTablet ? 100 : 64,
         backgroundColor: kGreen,
         elevation: 0,
         leading: IconButton(
           icon: Icon(
             Icons.arrow_back_ios,
             color: Colors.white,
-            size: isTablet ? 30 : 24,
+            size: isTablet ? 30 : 22,
           ),
           onPressed: widget.onBack,
         ),
         title: FittedBox(
           fit: BoxFit.scaleDown,
           child: Text(
-            "Your Cart (${widget.cart.length})",
+            isTablet
+                ? "Your Cart (${widget.cart.length})"
+                : "Cart (${widget.cart.length})",
             maxLines: 1,
             style: TextStyle(
               fontSize: isTablet ? 28 : 20,
-              fontWeight: FontWeight.w700,
+              fontWeight: FontWeight.w900,
               color: Colors.white,
             ),
           ),
@@ -425,7 +613,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
           Padding(
             padding: EdgeInsets.only(right: isTablet ? 20 : 12),
             child: SizedBox(
-              height: isTablet ? 50 : 40,
+              height: isTablet ? 50 : 38,
               child: ElevatedButton.icon(
                 onPressed: () => _showStartOverDialog(context),
                 style: ElevatedButton.styleFrom(
@@ -437,10 +625,10 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                 ),
                 icon: Icon(Icons.home, size: isTablet ? 22 : 18),
                 label: Text(
-                  "Start Again",
+                  isTablet ? "Start Again" : "Restart",
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
-                    fontSize: isTablet ? 18 : 14,
+                    fontSize: isTablet ? 18 : 13,
                   ),
                 ),
               ),
@@ -449,116 +637,46 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
         ],
       ),
       body: Column(
-        children: [
-          _tableHeader(isTablet),
-          Expanded(
-            child: Scrollbar(
-              controller: _cartScrollController,
-              thumbVisibility: true,
-              thickness: 5,
-              radius: const Radius.circular(8),
-              child: ListView.builder(
-                controller: _cartScrollController,
-                padding: const EdgeInsets.all(10),
-                itemCount: widget.cart.length,
-                itemBuilder: (context, i) =>
-                    _cartItem(widget.cart[i], i, isTablet),
-              ),
-            ),
-          ),
-          _buildRecommendedSection(isTablet),
-          _totalSection(isTablet),
-          Padding(
-            padding: EdgeInsets.fromLTRB(16, 12, 16, isTablet ? 30 : 20),
-            child: Row(
-              children: [
-                SizedBox(
-                  height: isTablet ? 80 : 60,
-                  child: OutlinedButton.icon(
-                    onPressed: widget.onBack,
-                    style: OutlinedButton.styleFrom(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: isTablet ? 26 : 18,
-                        vertical: isTablet ? 18 : 12,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        side: const BorderSide(
-                          color: Color.fromARGB(255, 86, 159, 44),
-                          width: 1.5,
-                        ),
-                      ),
-                    ),
-                    icon: Icon(
-                      Icons.add_circle_outline,
-                      color: const Color.fromARGB(255, 96, 179, 45),
-                      size: isTablet ? 28 : 22,
-                    ),
-                    label: Text(
-                      "Add More Items",
-                      style: TextStyle(
-                        color: Colors.black,
-                        fontSize: isTablet ? 18 : 14,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
+        children: isTablet
+            ? [
+                _tableHeader(isTablet),
                 Expanded(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: SizedBox(
-                      height: isTablet ? 64 : 52,
-                      width: isTablet ? 220 : 170,
-                      child: ScaleTransition(
-                        scale: _payScale,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green.shade700,
-                            foregroundColor: Colors.white,
-                            elevation: 4,
-                            shadowColor: Colors.green.withOpacity(0.3),
-                            padding: EdgeInsets.symmetric(
-                              vertical: isTablet ? 14 : 10,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                          ),
-                          onPressed: _goToPayment,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  Icons.shopping_cart,
-                                  size: isTablet ? 20 : 16,
-                                  color: Colors.white,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  "PROCEED TO PAY",
-                                  style: TextStyle(
-                                    fontSize: isTablet ? 16 : 12,
-                                    fontWeight: FontWeight.w900,
-                                    letterSpacing: 0.6,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
+                  child: Scrollbar(
+                    controller: _cartScrollController,
+                    thumbVisibility: true,
+                    thickness: 5,
+                    radius: const Radius.circular(8),
+                    child: ListView.builder(
+                      controller: _cartScrollController,
+                      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                      itemCount: widget.cart.length,
+                      itemBuilder: (context, i) =>
+                          _cartItem(widget.cart[i], i, isTablet),
                     ),
                   ),
                 ),
+                _totalSection(isTablet),
+                _bottomActions(isTablet),
+              ]
+            : [
+                Expanded(
+                  child: Scrollbar(
+                    controller: _cartScrollController,
+                    thumbVisibility: false,
+                    thickness: 4,
+                    radius: const Radius.circular(8),
+                    child: ListView.builder(
+                      controller: _cartScrollController,
+                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
+                      itemCount: widget.cart.length,
+                      itemBuilder: (context, i) =>
+                          _cartItemMobile(widget.cart[i], i),
+                    ),
+                  ),
+                ),
+                _totalSection(isTablet),
+                _bottomActions(isTablet),
               ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -584,164 +702,146 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
   }
 
   Widget _buildRecommendedSection(bool isTablet) {
-    final borderRadius = BorderRadius.circular(5);
     final recs = _filteredRecommendations();
 
     if (widget.cart.isEmpty || recs.isEmpty) {
       return const SizedBox.shrink();
     }
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(16, isTablet ? 10 : 6, 16, 6),
-      child: Container(
-        decoration: BoxDecoration(
-          color: const Color.fromARGB(255, 242, 220, 188),
-          borderRadius: BorderRadius.circular(isTablet ? 24 : 16),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ===== HEADER =====
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.auto_awesome,
-                    size: isTablet ? 26 : 24,
-                    color: const Color(0xFF22E6C7),
-                  ),
-                  const SizedBox(width: 8),
-                  ShaderMask(
-                    shaderCallback: (bounds) {
-                      return const LinearGradient(
-                        colors: [
-                          Color(0xFF22E6C7),
-                          Color(0xFF3A7BFF),
-                          Color(0xFF9B4DFF),
-                        ],
-                      ).createShader(bounds);
-                    },
-                    child: Text(
-                      "Recommended for You",
-                      style: TextStyle(
-                        fontSize: isTablet ? 24 : 22,
-                        fontWeight: FontWeight.w900,
-                        color: Colors.white,
-                        letterSpacing: 0.3,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final isMobile = !isTablet || width < 600;
+
+        final double cardWidth = isMobile
+            ? ((width - 38) / 2.35).clamp(124.0, 150.0)
+            : (isTablet ? 210 : 165);
+
+        final double cardHeight = isMobile ? 146 : (isTablet ? 222 : 198);
+
+        final double imageHeight = isMobile ? 70 : (isTablet ? 136 : 118);
+
+        final double titleSize = isMobile ? 16 : (isTablet ? 22 : 20);
+
+        final double textSize = isMobile ? 11.5 : (isTablet ? 13 : 12);
+
+        return Padding(
+          padding: EdgeInsets.fromLTRB(
+            isMobile ? 2 : 16,
+            isMobile ? 2 : 4,
+            isMobile ? 2 : 16,
+            isMobile ? 8 : 10,
+          ),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFEFE1),
+              borderRadius: BorderRadius.circular(isMobile ? 16 : 20),
             ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                /// HEADER
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    isMobile ? 12 : 16,
+                    isMobile ? 10 : 12,
+                    isMobile ? 12 : 16,
+                    isMobile ? 6 : 8,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.auto_awesome,
+                        size: isMobile ? 16 : 24,
+                        color: const Color(0xFF22E6C7),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          "Recommended",
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: titleSize,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
 
-            // ===== HORIZONTAL SCROLL =====
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final double cardWidth = isTablet ? 210 : 160;
-                  final double cardHeight = isTablet ? 232 : 200;
-                  final double imageHeight =
-                      (cardHeight - (isTablet ? 76 : 68)).clamp(80, cardHeight);
-                  final double dpr = MediaQuery.of(context).devicePixelRatio;
-                  final int cacheWidth =
-                      (cardWidth * dpr).round().clamp(1, 2048);
-                  final int cacheHeight =
-                      (imageHeight * dpr).round().clamp(1, 2048);
-
-                  return SizedBox(
+                /// LIST
+                Padding(
+                  padding: const EdgeInsets.only(
+                    left: 8,
+                    right: 8,
+                    bottom: 8,
+                  ),
+                  child: SizedBox(
                     height: cardHeight,
                     child: ListView.separated(
                       scrollDirection: Axis.horizontal,
                       physics: const BouncingScrollPhysics(),
                       itemCount: recs.length,
-                      separatorBuilder: (_, __) =>
-                          SizedBox(width: isTablet ? 12 : 10),
+                      separatorBuilder: (_, __) => SizedBox(
+                        width: isMobile ? 10 : 8,
+                      ),
                       itemBuilder: (_, index) {
                         final item = recs[index];
-                        BuildContext? imageContext;
+
                         final name = item["name"]?.toString() ??
                             item["item_name"]?.toString() ??
                             "";
+
                         final price = item["price"] ?? 0;
+
                         final image = item["image"]?.toString() ?? "";
+
+                        BuildContext? imageContext;
 
                         return SizedBox(
                           width: cardWidth,
-                          child: Container(
-                            padding: const EdgeInsets.all(5),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: Colors.grey.shade200),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.04),
-                                  blurRadius: 6,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
-                            ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(4),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                // IMAGE
                                 SizedBox(
                                   height: imageHeight,
+                                  width: double.infinity,
                                   child: ClipRRect(
-                                    borderRadius: borderRadius,
-                                    child: Container(
-                                      color: Colors.grey.shade100,
-                                      child: Builder(
-                                        builder: (ctx) {
-                                          imageContext = ctx;
-                                          final imageUrl =
-                                              normalizeImageUrl(image);
-                                          return image.isNotEmpty
-                                              ? AppNetworkImage(
-                                                  url: imageUrl,
-                                                  fit: BoxFit.cover,
-                                                  width: double.infinity,
-                                                  height: double.infinity,
-                                                  cacheWidth: cacheWidth,
-                                                  cacheHeight: cacheHeight,
-                                                  fallback: const Center(
-                                                    child: Icon(
-                                                      Icons.fastfood,
-                                                      size: 24,
-                                                    ),
-                                                  ),
-                                                )
-                                              : const Center(
-                                                  child: Icon(
-                                                    Icons.fastfood,
-                                                    size: 24,
-                                                  ),
-                                                );
-                                        },
-                                      ),
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Builder(
+                                      builder: (ctx) {
+                                        imageContext = ctx;
+
+                                        final url = normalizeImageUrl(image);
+
+                                        return image.isNotEmpty
+                                            ? AppNetworkImage(
+                                                url: url,
+                                                fit: BoxFit.cover,
+                                                fallback:
+                                                    const Icon(Icons.fastfood),
+                                              )
+                                            : const Icon(Icons.fastfood);
+                                      },
                                     ),
                                   ),
                                 ),
-
-                                const SizedBox(height: 6),
-
-                                // NAME
+                                const SizedBox(height: 4),
                                 Text(
                                   name,
-                                  maxLines: 1,
+                                  maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: isTablet ? 14 : 12,
+                                    fontSize: textSize,
+                                    height: 1.15,
+                                    fontWeight: FontWeight.w800,
                                   ),
                                 ),
-
-                                const SizedBox(height: 2),
-
-                                // PRICE + ADD
+                                const Spacer(),
                                 Row(
                                   mainAxisAlignment:
                                       MainAxisAlignment.spaceBetween,
@@ -749,14 +849,14 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                                     Text(
                                       "₹$price",
                                       style: TextStyle(
+                                        fontSize: textSize,
                                         fontWeight: FontWeight.bold,
-                                        color: kGreen,
-                                        fontSize: isTablet ? 14 : 12,
+                                        color: const Color(0xFFC40012),
                                       ),
                                     ),
                                     SizedBox(
-                                      height: 28,
-                                      width: 28,
+                                      height: isMobile ? 30 : 28,
+                                      width: isMobile ? 58 : 64,
                                       child: ElevatedButton(
                                         onPressed: () => _addRecommended(
                                           item,
@@ -764,17 +864,24 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                                         ),
                                         style: ElevatedButton.styleFrom(
                                           padding: EdgeInsets.zero,
-                                          backgroundColor: kGreen,
-                                          elevation: 0,
+                                          elevation: 4,
+                                          shadowColor:
+                                              _payGreen.withOpacity(0.35),
+                                          backgroundColor: _payGreen,
+                                          foregroundColor: Colors.white,
                                           shape: RoundedRectangleBorder(
-                                            borderRadius:
-                                                BorderRadius.circular(8),
+                                            borderRadius: BorderRadius.circular(
+                                              isMobile ? 9 : 7,
+                                            ),
                                           ),
                                         ),
-                                        child: const Icon(
-                                          Icons.add,
-                                          size: 18,
-                                          color: Colors.white,
+                                        child: Text(
+                                          "Add",
+                                          style: TextStyle(
+                                            fontSize: isMobile ? 12 : 11,
+                                            fontWeight: FontWeight.w900,
+                                            color: Colors.white,
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -786,11 +893,65 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                         );
                       },
                     ),
-                  );
-                },
-              ),
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildRecommendedAutoSheet(BuildContext sheetContext, bool isTablet) {
+    final maxHeight =
+        MediaQuery.of(context).size.height * (isTablet ? 0.48 : 0.55);
+
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        child: Material(
+          color: const Color(0xFFFFEFE1),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          clipBehavior: Clip.antiAlias,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              isTablet ? 18 : 10,
+              8,
+              isTablet ? 18 : 10,
+              12,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    const Spacer(),
+                    Container(
+                      width: 48,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      tooltip: "Close",
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: _buildRecommendedSection(isTablet),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -822,8 +983,8 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
   }
 
   Widget _cartItem(Map<String, dynamic> item, int index, bool isTablet) {
-    final int price = item["price"];
-    final int qty = item["qty"];
+    final int price = _asInt(item["price"]);
+    final int qty = _asInt(item["qty"]);
     final double dpr = MediaQuery.of(context).devicePixelRatio;
     final int imagePx = ((isTablet ? 70 : 34) * dpr).round();
     final imageUrl = normalizeImageUrlValue(item["image"]);
@@ -928,7 +1089,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
             constraints: const BoxConstraints(),
             icon: Icon(
               Icons.delete_outline,
-              color: Color(0xFF9F342C),
+              color: kGreen,
               size: isTablet ? 30 : 20,
             ),
             onPressed: () {
@@ -942,6 +1103,229 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
     );
   }
 
+  Widget _cartItemMobile(Map<String, dynamic> item, int index) {
+    final int price = _asInt(item["price"]);
+    final int qty = _asInt(item["qty"]);
+    final int parcelCharge = _asInt(item["take_away_charge"]);
+    final imageUrl = normalizeImageUrlValue(item["image"]);
+    final double dpr = MediaQuery.of(context).devicePixelRatio;
+    final int imagePx = (66 * dpr).round();
+    final String name = item["name"]?.toString() ?? "Item";
+    final String? variation = item["variation"] is Map
+        ? (item["variation"] as Map)["variation"]?.toString()
+        : null;
+    final modifiers = item["modifiers"] is List
+        ? (item["modifiers"] as List)
+            .map((e) => e is Map ? e["name"]?.toString() : null)
+            .whereType<String>()
+            .where((e) => e.trim().isNotEmpty)
+            .take(2)
+            .join(", ")
+        : "";
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE9E9E9)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0D000000),
+            blurRadius: 12,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: imageUrl.isNotEmpty
+                    ? AppNetworkImage(
+                        url: imageUrl,
+                        width: 66,
+                        height: 66,
+                        cacheWidth: imagePx,
+                        cacheHeight: imagePx,
+                        fit: BoxFit.cover,
+                        fallback: const Icon(Icons.fastfood, size: 38),
+                      )
+                    : const SizedBox(
+                        width: 66,
+                        height: 66,
+                        child: Icon(Icons.fastfood, size: 38),
+                      ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        height: 1.15,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1F1F1F),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      "₹$price each",
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.black54,
+                      ),
+                    ),
+                    if ((variation ?? "").isNotEmpty || modifiers.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          [
+                            if ((variation ?? "").isNotEmpty) variation,
+                            if (modifiers.isNotEmpty) modifiers,
+                          ].whereType<String>().join(" - "),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.black45,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    if (_isTakeAway && parcelCharge > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          "Parcel ₹$parcelCharge",
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.black45,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(
+                  Icons.delete_outline_rounded,
+                  color: kGreen,
+                  size: 22,
+                ),
+                onPressed: () {
+                  setState(() => widget.cart.removeAt(index));
+                  widget.onCartUpdated();
+                  if (widget.cart.isEmpty) widget.onBack();
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              _quantityStepper(index, qty),
+              const Spacer(),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  const Text(
+                    "Item total",
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.black45,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    "₹${price * qty}",
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                      color: kGreen,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _quantityStepper(int index, int qty) {
+    return Container(
+      height: 38,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F6F4),
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(color: const Color(0xFFE2E4DF)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _stepperButton(
+            icon: Icons.remove_rounded,
+            color: kGreen,
+            onTap: () => _updateQty(index, qty - 1),
+          ),
+          SizedBox(
+            width: 36,
+            child: Text(
+              "$qty",
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          _stepperButton(
+            icon: Icons.add_rounded,
+            color: _payGreen,
+            onTap: () => _updateQty(index, qty + 1),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _stepperButton({
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        width: 30,
+        height: 30,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: Icon(icon, color: Colors.white, size: 18),
+      ),
+    );
+  }
+
   Widget _totalSection(bool isTablet) {
     final subtotal = _calculateSubtotal();
     final parcelTotal = _calculateParcelTotal();
@@ -950,15 +1334,20 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
     final baseAmount = _calculateBaseAmount(total);
 
     return Container(
-      padding: EdgeInsets.all(isTablet ? 30 : 16),
+      padding: EdgeInsets.fromLTRB(
+        isTablet ? 30 : 16,
+        isTablet ? 30 : 14,
+        isTablet ? 30 : 16,
+        isTablet ? 30 : 12,
+      ),
       decoration: const BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black12,
-            blurRadius: 10,
-            offset: Offset(0, -2),
+            color: Color(0x18000000),
+            blurRadius: 14,
+            offset: Offset(0, -3),
           ),
         ],
       ),
@@ -968,7 +1357,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
             "Grand Total",
             "₹${total.toStringAsFixed(2)}",
             isBold: true,
-            fontSize: isTablet ? 27 : 22,
+            fontSize: isTablet ? 27 : 21,
             color: const Color.fromARGB(255, 0, 0, 0),
             isTablet: isTablet,
           ),
@@ -982,7 +1371,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                 isTablet: isTablet,
               ),
             ),
-          const Divider(height: 20),
+          const Divider(height: 18),
           if (gstEnabled) ...[
             InkWell(
               onTap: () => setState(() => gstExpanded = !gstExpanded),
@@ -995,7 +1384,7 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                         "GST Included",
                         style: TextStyle(
                           color: Colors.black54,
-                          fontSize: isTablet ? 18 : 14,
+                          fontSize: isTablet ? 18 : 13,
                         ),
                       ),
                       Icon(
@@ -1011,8 +1400,8 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
                     Text(
                       "₹${gstAmount.toStringAsFixed(2)}",
                       style: TextStyle(
-                        color: const Color.fromARGB(136, 255, 255, 255),
-                        fontSize: isTablet ? 18 : 14,
+                        color: Colors.black54,
+                        fontSize: isTablet ? 18 : 13,
                       ),
                     ),
                 ],
@@ -1041,6 +1430,90 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
               ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _bottomActions(bool isTablet) {
+    return SafeArea(
+      top: false,
+      child: Container(
+        color: Colors.white,
+        padding: EdgeInsets.fromLTRB(12, 8, 12, isTablet ? 22 : 12),
+        child: Row(
+          children: [
+            Expanded(
+              flex: isTablet ? 1 : 5,
+              child: SizedBox(
+                height: isTablet ? 64 : 50,
+                width: isTablet ? 260 : null,
+                child: OutlinedButton.icon(
+                  onPressed: widget.onBack,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF1F1F1F),
+                    side: const BorderSide(color: Color(0xFFD5D8D0)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  icon: Icon(
+                    Icons.add_circle_outline_rounded,
+                    color: _payGreen,
+                    size: isTablet ? 28 : 20,
+                  ),
+                  label: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      isTablet ? "Add More Items" : "Add More",
+                      style: TextStyle(
+                        fontSize: isTablet ? 18 : 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              flex: isTablet ? 1 : 6,
+              child: SizedBox(
+                height: isTablet ? 64 : 50,
+                width: isTablet ? 260 : null,
+                child: ScaleTransition(
+                  scale: _payScale,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _payGreen,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                    onPressed: _goToPayment,
+                    icon: Icon(
+                      Icons.shopping_cart_checkout_rounded,
+                      size: isTablet ? 24 : 20,
+                    ),
+                    label: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        isTablet ? "PROCEED TO PAY" : "Pay Now",
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: isTablet ? 0.6 : 0,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1106,8 +1579,8 @@ class _CartPageState extends State<CartPage> with TickerProviderStateMixin {
     if (total <= 0) return;
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => PaymentScreen(
+      fastPageRoute(
+        (_) => PaymentScreen(
           cart: List<Map<String, dynamic>>.from(widget.cart),
           totalAmount: total.toInt(),
           orderType: widget.orderType,

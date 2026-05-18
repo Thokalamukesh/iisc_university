@@ -21,18 +21,45 @@ require_env() {
 }
 
 aws_cmd() {
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    aws --region "$AWS_REGION" "$@"
-  else
-    aws "$@"
-  fi
+  local attempt=1
+  local max_attempts="${AWS_DEPLOY_MAX_ATTEMPTS:-5}"
+  local delay=2
+
+  while true; do
+    if [[ -n "${AWS_REGION:-}" ]]; then
+      aws --region "$AWS_REGION" "$@" && return 0
+    else
+      aws "$@" && return 0
+    fi
+
+    if (( attempt >= max_attempts )); then
+      return 1
+    fi
+
+    echo "AWS command failed; retrying in ${delay}s (${attempt}/${max_attempts})..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
 }
 
 require_command flutter
 require_command aws
 require_env AWS_S3_BUCKET
 
-BUILD_ARGS=(build web --release --pwa-strategy=none)
+export AWS_RETRY_MODE="${AWS_RETRY_MODE:-adaptive}"
+export AWS_MAX_ATTEMPTS="${AWS_MAX_ATTEMPTS:-10}"
+
+WEB_RENDERER="${WEB_RENDERER:-html}"
+DART2JS_OPTIMIZATION="${DART2JS_OPTIMIZATION:-O4}"
+
+BUILD_ARGS=(
+  build web
+  --release
+  --pwa-strategy=none
+  --web-renderer "$WEB_RENDERER"
+  --dart2js-optimization "$DART2JS_OPTIMIZATION"
+)
 
 if [[ -n "${FLUTTER_BASE_HREF:-}" ]]; then
   BUILD_ARGS+=(--base-href "$FLUTTER_BASE_HREF")
@@ -50,7 +77,12 @@ if [[ -n "${SELFX_WEB_RESTAURANTS_URL:-}" ]]; then
   )
 fi
 
+BUILD_STAMP="${SELFX_BUILD_STAMP:-$(date -u +%Y%m%d%H%M%S)}"
+BUILD_ARGS+=("--dart-define=SELFX_BUILD_STAMP=${BUILD_STAMP}")
+
 echo "🚀 Building Flutter web..."
+echo "Build stamp: ${BUILD_STAMP}"
+rm -rf build/web
 flutter "${BUILD_ARGS[@]}"
 
 NO_CACHE_FILES=(

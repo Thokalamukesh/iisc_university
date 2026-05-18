@@ -12,6 +12,8 @@ void kioskLog(
   if (!kDebugMode) return;
 
   debugPrint('[$tag] $text');
+  if (kIsWeb) return;
+
   developer.log(
     text,
     name: tag,

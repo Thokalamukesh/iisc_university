@@ -18,6 +18,7 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="description" content="A new Flutter project.">
 
   <!-- iOS meta tags & icons -->
@@ -31,6 +32,71 @@
 
   <title>SELFX</title>
   <link rel="manifest" href="manifest.json">
+  <style>
+    body {
+      margin: 0;
+      background: #f6f6f7;
+    }
+
+    #app-loading {
+      min-height: 100vh;
+      background: #f6f6f7;
+    }
+
+    #recaptcha-container {
+      position: fixed;
+      left: -10000px;
+      top: -10000px;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .grecaptcha-badge {
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+
+    #app-startup-error {
+      display: none;
+      min-height: 100vh;
+      padding: 24px;
+      box-sizing: border-box;
+      font-family: Arial, sans-serif;
+      color: #151518;
+      background: #f6f6f7;
+    }
+
+    #app-startup-error div {
+      max-width: 460px;
+      margin: 15vh auto 0;
+      padding: 20px;
+      border: 1px solid #edecef;
+      border-radius: 12px;
+      background: #ffffff;
+      box-shadow: 0 14px 28px rgba(0, 0, 0, 0.08);
+    }
+
+    #app-startup-error h3 {
+      margin: 0 0 10px;
+      font-size: 18px;
+    }
+
+    #app-startup-error-message {
+      margin: 0;
+      color: #9f342c;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+
+  </style>
 
   <script>
     document.title = 'SELFX';
@@ -49,47 +115,158 @@
     // The value below is injected by flutter build, do not touch.
     const serviceWorkerVersion = null;
   </script>
-  <script>
-    // Load flutter.js with build-version cache busting so clients don't stick
-    // to previously cached immutable runtime files after deployment.
-    (function loadFlutterJs() {
-      const script = document.createElement('script');
-      const version = serviceWorkerVersion || Date.now().toString();
-      script.src = `flutter.js?v=${version}`;
-      script.defer = true;
-      document.head.appendChild(script);
-    })();
-  </script>
+  <script src="flutter.js" defer></script>
 </head>
 <body>
+  <div id="recaptcha-container" aria-hidden="true"></div>
+  <div id="app-loading" aria-hidden="true"></div>
+  <div id="app-startup-error">
+    <div>
+      <h3>Unable to start SELFX</h3>
+      <p id="app-startup-error-message">Please refresh and try again.</p>
+    </div>
+  </div>
   <script>
-    async function clearLegacyFlutterCaches() {
-      if ('serviceWorker' in navigator) {
-        try {
-          const registrations = await navigator.serviceWorker.getRegistrations();
-          await Promise.all(registrations.map((registration) => registration.unregister()));
-        } catch (_) {}
-      }
+    let flutterAppStarted = false;
+    let startupTimeoutId = null;
 
-      if ('caches' in window) {
-        try {
-          const keys = await caches.keys();
-          await Promise.all(keys.map((key) => caches.delete(key)));
-        } catch (_) {}
+    window.addEventListener('selfx-flutter-ready', function() {
+      flutterAppStarted = true;
+      if (startupTimeoutId) {
+        clearTimeout(startupTimeoutId);
+        startupTimeoutId = null;
+      }
+      hideStartupError();
+      hideStartupLoading();
+    });
+
+    window.addEventListener('selfx-flutter-error', function(event) {
+      const detail = event.detail || {};
+      showStartupError(detail.message || 'Flutter app crashed during startup.');
+    });
+
+    function showStartupError(message) {
+      if (flutterAppStarted) {
+        console.error('[SELFX][WEB] Runtime error after Flutter startup:', message);
+        return;
+      }
+      hideStartupLoading();
+      const errorEl = document.getElementById('app-startup-error');
+      const messageEl = document.getElementById('app-startup-error-message');
+      if (messageEl && message) {
+        messageEl.textContent = message;
+      }
+      if (errorEl) {
+        errorEl.style.display = 'block';
       }
     }
 
+    function hideStartupLoading() {
+      const loadingEl = document.getElementById('app-loading');
+      if (loadingEl) {
+        loadingEl.style.display = 'none';
+      }
+    }
+
+    function hideStartupError() {
+      const errorEl = document.getElementById('app-startup-error');
+      if (errorEl) {
+        errorEl.style.display = 'none';
+      }
+    }
+
+    window.addEventListener('error', function(event) {
+      showStartupError(event.message || 'The app could not load.');
+    });
+
+    window.addEventListener('unhandledrejection', function(event) {
+      const reason = event.reason;
+      showStartupError(reason && reason.message ? reason.message : 'The app could not load.');
+    });
+
+    async function removeOldServiceWorkers() {
+      if (!('serviceWorker' in navigator)) return;
+
+      try {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        if (registrations.length === 0) return;
+        await Promise.all(registrations.map((registration) => registration.unregister()));
+        if (navigator.serviceWorker.controller &&
+            sessionStorage.getItem('selfx-sw-cleared') !== '1') {
+          sessionStorage.setItem('selfx-sw-cleared', '1');
+          window.location.reload();
+        }
+      } catch (_) {}
+    }
+
+    async function clearOldCaches() {
+      if (!('caches' in window)) return;
+
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((key) => caches.delete(key)));
+      } catch (_) {}
+    }
+
     window.addEventListener('load', function(ev) {
-      clearLegacyFlutterCaches().finally(function() {
-        const version = serviceWorkerVersion || Date.now().toString();
-        _flutter.loader.loadEntrypoint({
-          entrypointUrl: 'main.dart.js?v=' + version,
+      console.info('[OTP][WEB] host=' + window.location.hostname + ' recaptcha_container=' + Boolean(document.getElementById('recaptcha-container')));
+      startupTimeoutId = setTimeout(function() {
+        showStartupError('The app is taking too long to start. Refresh once, or clear this site from browser settings.');
+      }, 45000);
+
+      Promise.all([
+        removeOldServiceWorkers(),
+        clearOldCaches(),
+      ]).finally(function() {
+        if (!window._flutter || !_flutter.loader) {
+          clearTimeout(startupTimeoutId);
+          startupTimeoutId = null;
+          showStartupError('Flutter runtime failed to load. Refresh or clear browser cache.');
+          return;
+        }
+
+        const loadResult = _flutter.loader.loadEntrypoint({
+          entrypointUrl: 'main.dart.js?v=' + Date.now().toString(),
           onEntrypointLoaded: function(engineInitializer) {
             engineInitializer.initializeEngine().then(function(appRunner) {
-              appRunner.runApp();
+              try {
+                const runResult = appRunner.runApp();
+                window.setTimeout(function() {
+                  if (!flutterAppStarted) {
+                    console.info('[SELFX][WEB] Flutter ready event not received; hiding startup loader after runApp fallback.');
+                    flutterAppStarted = true;
+                    if (startupTimeoutId) {
+                      clearTimeout(startupTimeoutId);
+                      startupTimeoutId = null;
+                    }
+                    hideStartupError();
+                    hideStartupLoading();
+                  }
+                }, 800);
+                Promise.resolve(runResult).catch(function(error) {
+                  showStartupError(error && error.message ? error.message : 'Flutter app failed to start.');
+                });
+              } catch (error) {
+                showStartupError(error && error.message ? error.message : 'Flutter app failed to start.');
+              }
+            }).catch(function(error) {
+              clearTimeout(startupTimeoutId);
+              startupTimeoutId = null;
+              showStartupError(error && error.message ? error.message : 'Flutter engine failed to start.');
             });
           }
         });
+        if (loadResult && typeof loadResult.catch === 'function') {
+          loadResult.catch(function(error) {
+            clearTimeout(startupTimeoutId);
+            startupTimeoutId = null;
+            showStartupError(error && error.message ? error.message : 'Flutter app failed to load.');
+          });
+        }
+      }).catch(function(error) {
+        clearTimeout(startupTimeoutId);
+        startupTimeoutId = null;
+        showStartupError(error && error.message ? error.message : 'Flutter app failed to load.');
       });
     });
   </script>

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:api_selfxo_project/api/admin_api.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
+import 'package:api_selfxo_project/widget/app_network_image.dart';
 
 class CategoriesScreen extends StatefulWidget {
   const CategoriesScreen({super.key});
@@ -689,12 +690,12 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                               final cacheHeight = (constraints.maxHeight * dpr)
                                   .round()
                                   .clamp(1, 4096);
-                              return Image.network(
-                                imageUrl,
+                              return AppNetworkImage(
+                                url: imageUrl,
                                 fit: BoxFit.cover,
                                 cacheWidth: cacheWidth,
                                 cacheHeight: cacheHeight,
-                                errorBuilder: (_, __, ___) => Container(
+                                fallback: Container(
                                   color: Colors.grey[100],
                                   child:
                                       const Icon(Icons.dinner_dining_rounded),

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/rendering.dart';
 import 'package:api_selfxo_project/core/image_url.dart';
 import 'package:api_selfxo_project/widget/app_network_image.dart';
 
@@ -51,7 +50,9 @@ class ProductCardRef extends StatefulWidget {
 }
 
 class _ProductCardRefState extends State<ProductCardRef> {
-  static const Color kGreen = Color(0xFF1B8E3E);
+  static const Color _orderRed = Color(0xFFD90012);
+  static const Color _plusGreen = Color(0xFF2F8F46);
+
   late int qty;
   BuildContext? _imageContext;
   Map<String, dynamic>? _lastVariation;
@@ -239,54 +240,78 @@ class _ProductCardRefState extends State<ProductCardRef> {
     final isTablet = MediaQuery.of(context).size.width > 600;
     final isCompactWebCard = kIsWeb && !isTablet;
 
-    return Padding(
-      padding: EdgeInsets.symmetric(
-        horizontal: isCompactWebCard ? 8 : 10,
-        vertical: isCompactWebCard ? 1 : 2,
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        mainAxisSize: MainAxisSize.max,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Text(
-            widget.name,
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: isTablet ? 16 : (isCompactWebCard ? 12 : 13),
-              fontWeight: FontWeight.w600,
-              height: isCompactWebCard ? 1.1 : null,
-            ),
-          ),
-          Text(
-            "₹${widget.price}",
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            style: TextStyle(
-              fontSize: isTablet ? 16 : (isCompactWebCard ? 13 : 14),
-              fontWeight: FontWeight.bold,
-              color: const Color.fromARGB(255, 0, 0, 0),
-              height: isCompactWebCard ? 1.05 : null,
-            ),
-          ),
-          if (_needsCustomization)
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final shortInfoArea = constraints.maxHeight < 46;
+        final nameSize = shortInfoArea
+            ? (isTablet ? 13.5 : 12.0)
+            : (isTablet ? 15.0 : (isCompactWebCard ? 12.0 : 13.0));
+        final priceSize = shortInfoArea
+            ? (isTablet ? 13.5 : 12.5)
+            : (isTablet ? 15.0 : (isCompactWebCard ? 13.0 : 14.0));
+
+        final content = Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
             Text(
-              "Variants Available",
+              widget.name,
               textAlign: TextAlign.center,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: isCompactWebCard ? 8.5 : 10,
-                color: Colors.orange,
+                fontSize: nameSize,
+                fontWeight: FontWeight.w600,
                 height: 1.0,
               ),
-            )
-          else
-            SizedBox(height: isTablet ? 12 : (isCompactWebCard ? 0 : 2)),
-        ],
-      ),
+            ),
+            const SizedBox(height: 1),
+            Text(
+              "₹${widget.price}",
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: priceSize,
+                fontWeight: FontWeight.bold,
+                color: const Color.fromARGB(255, 0, 0, 0),
+                height: 1.0,
+              ),
+            ),
+            if (_needsCustomization) ...[
+              const SizedBox(height: 1),
+              Text(
+                "Variants Available",
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: shortInfoArea ? 8 : (isCompactWebCard ? 8.5 : 10),
+                  color: Colors.orange,
+                  height: 1.0,
+                ),
+              ),
+            ],
+          ],
+        );
+
+        return Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: isCompactWebCard ? 8 : 10,
+            vertical: isCompactWebCard ? 1 : 2,
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.center,
+            child: SizedBox(
+              width: constraints.maxWidth -
+                  (isCompactWebCard ? 16 : 20).clamp(0, constraints.maxWidth),
+              child: content,
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -295,34 +320,67 @@ class _ProductCardRefState extends State<ProductCardRef> {
     final bool isCompactWebCard = kIsWeb && !isTablet;
     return SizedBox(
       height: isCompactWebCard ? 28 : 32,
-      child: OutlinedButton(
-        style: OutlinedButton.styleFrom(
-          backgroundColor: const Color(0xFFF4C66A),
-          foregroundColor: const Color(0xFF1F1F1F),
-          side: const BorderSide(color: Color(0xFFE2B85E), width: 1),
-          padding: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        ),
-        onPressed: () =>
-            _needsCustomization ? _openCustomizationSheet() : _addDirect(),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.add,
-              size: isCompactWebCard ? 15 : 18,
-              color: const Color(0xFF1F1F1F),
-            ),
-            SizedBox(width: isCompactWebCard ? 4 : 6),
-            Text(
-              "Add",
-              style: TextStyle(
-                fontWeight: FontWeight.w800,
-                color: const Color(0xFF1F1F1F),
-                fontSize: isCompactWebCard ? 12 : 14,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () =>
+              _needsCustomization ? _openCustomizationSheet() : _addDirect(),
+          child: Ink(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFFFF2337), _orderRed, Color(0xFFB90010)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: _orderRed.withOpacity(0.22),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
+                ),
+              ],
             ),
-          ],
+            child: Stack(
+              children: [
+                Positioned(
+                  left: 8,
+                  right: 8,
+                  top: 2,
+                  child: Container(
+                    height: 9,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.20),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                ),
+                Center(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.add,
+                        size: isCompactWebCard ? 15 : 18,
+                        color: Colors.white,
+                      ),
+                      SizedBox(width: isCompactWebCard ? 4 : 6),
+                      Text(
+                        "Add",
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                          fontSize: isCompactWebCard ? 12 : 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -399,8 +457,7 @@ class _ProductCardRefState extends State<ProductCardRef> {
         height: height ?? (isTablet ? 32 : 28),
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: backgroundColor ??
-              (isPrimary ? const Color(0xFF1B8E3E) : Colors.white),
+          color: backgroundColor ?? (isPrimary ? _plusGreen : Colors.white),
           borderRadius: BorderRadius.circular(8),
         ),
         child: Text(
@@ -952,6 +1009,7 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
     );
   }
 }
+
 ///
 ///
 ///

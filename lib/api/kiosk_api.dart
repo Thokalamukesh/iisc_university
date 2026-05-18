@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -5,40 +6,55 @@ import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:api_selfxo_project/services/auth_service.dart';
+import 'package:api_selfxo_project/services/restaurant_api_service.dart';
 import 'dio_client.dart';
-import 'web_api_config.dart';
 
 class KioskApi {
   static const String _webRestaurantsCacheKey = "web_restaurants_cache";
+  static const String _productsCacheKey = "kiosk_products_cache";
+  static const int _defaultWebRestaurantsBranchId = 4;
   static const Duration _webRestaurantsMemoryTtl = Duration(minutes: 3);
   static const Duration _webRestaurantsFailureBackoff = Duration(seconds: 5);
-  static const bool _allowCrossOriginOnLocalhost = bool.fromEnvironment(
-    "SELFX_WEB_ALLOW_CROSS_ORIGIN_ON_LOCALHOST",
-    defaultValue: false,
-  );
+  static const Duration _productsCacheTtl = Duration(minutes: 8);
   static Future<List<Map<String, dynamic>>>? _webRestaurantsInFlight;
-  static bool _localhostPolicyLogged = false;
+  static int? _webRestaurantsInFlightBranchId;
   static List<Map<String, dynamic>>? _webRestaurantsMemoryCache;
+  static int? _webRestaurantsMemoryBranchId;
   static DateTime? _webRestaurantsMemoryCachedAt;
   static DateTime? _webRestaurantsLastFailureAt;
+  static Future<Response>? _productsInFlight;
+  static String? _productsInFlightRestaurantKey;
+  static Response? _productsMemoryCache;
+  static String? _productsMemoryRestaurantKey;
+  static DateTime? _productsMemoryCachedAt;
 
   // =========================================================
   // RESTAURANT + KIOSK SETTINGS
   // =========================================================
   Future<Response> getRestaurantData() async {
+    final timer = Stopwatch()..start();
     final dio = await DioClient.getAuthedDio();
-    return dio.get("kiosks/getRestaurantData");
+    try {
+      return await dio.get("kiosks/getRestaurantData");
+    } finally {
+      timer.stop();
+      kioskLog(
+        "getRestaurantData duration=${timer.elapsedMilliseconds}ms",
+        tag: "RESTAURANT_API",
+      );
+    }
   }
 
   Future<List<Map<String, dynamic>>> getAllRestaurantsWeb({
     bool forceRefresh = false,
   }) async {
-    if (!kIsWeb) return const [];
     final now = DateTime.now();
+    final branchId = await _currentWebRestaurantsBranchId();
     final memory = _webRestaurantsMemoryCache;
     final memoryCachedAt = _webRestaurantsMemoryCachedAt;
     final memoryFresh = memory != null &&
         memory.isNotEmpty &&
+        _webRestaurantsMemoryBranchId == branchId &&
         memoryCachedAt != null &&
         now.difference(memoryCachedAt) <= _webRestaurantsMemoryTtl;
     if (!forceRefresh && memoryFresh) {
@@ -49,268 +65,103 @@ class KioskApi {
     if (!forceRefresh &&
         lastFailureAt != null &&
         now.difference(lastFailureAt) < _webRestaurantsFailureBackoff) {
-      final cached = await _readCachedRestaurants();
+      final cached = await _readCachedRestaurants(branchId);
       if (cached.isNotEmpty) {
-        _setWebRestaurantsMemoryCache(cached);
+        _setWebRestaurantsMemoryCache(cached, branchId);
         return cached;
       }
-      return const [];
+      throw const RestaurantApiException(
+        type: RestaurantApiErrorType.unknown,
+        message: "Restaurant service is temporarily unavailable.",
+      );
     }
 
     final pending = _webRestaurantsInFlight;
-    if (pending != null) {
+    if (pending != null && _webRestaurantsInFlightBranchId == branchId) {
+      kioskLog(
+        'Using in-flight restaurant request',
+        tag: 'WEB_RESTAURANTS',
+      );
       return pending;
     }
 
-    final future = _loadAllRestaurantsWeb();
+    final future = _loadAllRestaurantsWeb(
+      forceRefresh: forceRefresh,
+      branchId: branchId,
+    );
     _webRestaurantsInFlight = future;
+    _webRestaurantsInFlightBranchId = branchId;
     try {
       final list = await future;
       if (list.isNotEmpty) {
-        _setWebRestaurantsMemoryCache(list);
+        _setWebRestaurantsMemoryCache(list, branchId);
       }
       return list;
     } finally {
       if (identical(_webRestaurantsInFlight, future)) {
         _webRestaurantsInFlight = null;
+        _webRestaurantsInFlightBranchId = null;
       }
     }
   }
 
-  Future<List<Map<String, dynamic>>> _loadAllRestaurantsWeb() async {
-    final dio = Dio(
-      BaseOptions(
-        connectTimeout: const Duration(seconds: 12),
-        receiveTimeout: const Duration(seconds: 18),
-        sendTimeout: null,
-        headers: const {
-          "Accept": "application/json",
-        },
-        validateStatus: (status) => status != null && status < 500,
-      ),
-    );
-
-    final candidates = _restaurantEndpointCandidates();
-    for (final endpoint in candidates) {
-      try {
-        kioskLog(
-          'Loading web restaurants from $endpoint',
-          tag: 'WEB_RESTAURANTS',
-        );
-        final initial = await dio.get(endpoint);
-        final statusCode = initial.statusCode ?? 0;
-        if (statusCode >= 400) {
-          kioskLog(
-            'Endpoint $endpoint returned $statusCode; trying next',
-            tag: 'WEB_RESTAURANTS',
-          );
-          continue;
-        }
-
-        final direct = _extractRestaurantList(initial.data);
-        if (direct.isNotEmpty) {
-          _webRestaurantsLastFailureAt = null;
-          await _cacheRestaurants(direct);
-          kioskLog(
-            'Loaded ${direct.length} restaurants directly from JSON',
-            tag: 'WEB_RESTAURANTS',
-          );
-          return direct;
-        }
-
-        final fallbackUrl = _deriveRestaurantApiUrl(
-          configuredUrl: endpoint,
-          responseData: initial.data,
-        );
-        if (fallbackUrl == null || fallbackUrl == endpoint) continue;
-
-        kioskLog(
-          'Falling back to restaurant API $fallbackUrl',
-          tag: 'WEB_RESTAURANTS',
-        );
-        final fallback = await dio.get(fallbackUrl);
-        final fallbackStatus = fallback.statusCode ?? 0;
-        if (fallbackStatus >= 400) {
-          kioskLog(
-            'Fallback $fallbackUrl returned $fallbackStatus',
-            tag: 'WEB_RESTAURANTS',
-          );
-          continue;
-        }
-        final list = _extractRestaurantList(fallback.data);
-        if (list.isNotEmpty) {
-          _webRestaurantsLastFailureAt = null;
-          await _cacheRestaurants(list);
-          kioskLog(
-            'Loaded ${list.length} restaurants from fallback JSON',
-            tag: 'WEB_RESTAURANTS',
-          );
-          return list;
-        }
-      } catch (e, stackTrace) {
-        kioskLogError(
-          'Restaurant endpoint failed [$endpoint]: $e',
-          tag: 'WEB_RESTAURANTS',
-          error: e,
-          stackTrace: stackTrace,
-        );
-      }
-    }
-
-    final cached = await _readCachedRestaurants();
-    if (cached.isNotEmpty) {
+  Future<List<Map<String, dynamic>>> _loadAllRestaurantsWeb({
+    required bool forceRefresh,
+    required int branchId,
+  }) async {
+    try {
+      final list = await RestaurantApiService.instance.fetchRestaurants();
       _webRestaurantsLastFailureAt = null;
-      kioskLog(
-        'Using ${cached.length} cached restaurants',
+      await _cacheRestaurants(list, branchId);
+      return list;
+    } catch (e, stackTrace) {
+      kioskLogError(
+        'Restaurant live load failed: $e',
         tag: 'WEB_RESTAURANTS',
+        error: e,
+        stackTrace: stackTrace,
       );
-      return cached;
-    }
 
-    _webRestaurantsLastFailureAt = DateTime.now();
-    return const [];
+      if (!forceRefresh) {
+        final cached = await _readCachedRestaurants(branchId);
+        if (cached.isNotEmpty) {
+          _webRestaurantsLastFailureAt = null;
+          kioskLog(
+            'Using ${cached.length} cached restaurants after live load failure',
+            tag: 'WEB_RESTAURANTS',
+          );
+          return cached;
+        }
+      }
+
+      _webRestaurantsLastFailureAt = DateTime.now();
+      rethrow;
+    }
   }
 
-  void _setWebRestaurantsMemoryCache(List<Map<String, dynamic>> restaurants) {
+  void _setWebRestaurantsMemoryCache(
+      List<Map<String, dynamic>> restaurants, int branchId) {
     _webRestaurantsMemoryCache = List<Map<String, dynamic>>.from(restaurants);
+    _webRestaurantsMemoryBranchId = branchId;
     _webRestaurantsMemoryCachedAt = DateTime.now();
   }
 
-  List<Map<String, dynamic>> _extractRestaurantList(dynamic raw) {
-    final rawList = raw is List
-        ? raw
-        : raw is Map
-            ? (raw["data"] ?? raw["restaurants"] ?? raw["items"])
-            : null;
-    if (rawList is! List) return const [];
-
-    return rawList
-        .whereType<Map>()
-        .map((item) => item.map((key, value) => MapEntry("$key", value)))
-        .toList();
-  }
-
-  String? _deriveRestaurantApiUrl({
-    required String configuredUrl,
-    required dynamic responseData,
-  }) {
-    final configuredUri = Uri.tryParse(configuredUrl);
-    if (configuredUri == null || responseData is! String) return null;
-
-    final html = responseData;
-    final match = RegExp(
-      r"""fetch\(\s*['"]([^'"]+)['"]\s*\)""",
-      caseSensitive: false,
-    ).firstMatch(html);
-    final path = match?.group(1)?.trim();
-    if (path == null || path.isEmpty) return null;
-
-    return configuredUri.resolve(path).toString();
-  }
-
-  List<String> _restaurantEndpointCandidates() {
-    final seen = <String>{};
-    final candidates = <String>[];
-    final webBaseUri = Uri.base;
-    final restrictCrossOrigin =
-        _isLocalDevHost(webBaseUri.host) && !_allowCrossOriginOnLocalhost;
-
-    void addCandidate(
-      String? raw, {
-      bool allowCrossOrigin = true,
-    }) {
-      final value = raw?.trim();
-      if (value == null || value.isEmpty) return;
-      final parsed = Uri.tryParse(value);
-      if (parsed == null) return;
-      final uri = parsed.hasScheme ? parsed : webBaseUri.resolve(value);
-      if (!uri.hasScheme || !uri.hasAuthority) return;
-      if (!allowCrossOrigin && !_isSameOrigin(uri, webBaseUri)) return;
-      final normalized = uri.toString();
-      if (seen.add(normalized)) {
-        candidates.add(normalized);
-      }
-    }
-
-    if (restrictCrossOrigin) {
-      addCandidate("/api/all-restaurants", allowCrossOrigin: false);
-      addCandidate("api/all-restaurants", allowCrossOrigin: false);
-      addCandidate(WebApiConfig.allRestaurantsUrl, allowCrossOrigin: false);
-      final localConfigured = Uri.tryParse(WebApiConfig.baseUrl);
-      if (localConfigured != null &&
-          localConfigured.hasScheme &&
-          localConfigured.hasAuthority) {
-        addCandidate(
-          localConfigured.resolve("all-restaurants").toString(),
-          allowCrossOrigin: false,
-        );
-      }
-      // Keep same-origin first for local proxy setups, but also try
-      // known remote endpoints as fallback to avoid empty restaurant lists
-      // when localhost proxy is unavailable.
-      addCandidate(WebApiConfig.allRestaurantsUrl);
-      final baseUri = Uri.tryParse(WebApiConfig.baseUrl);
-      if (baseUri != null && baseUri.hasScheme && baseUri.hasAuthority) {
-        addCandidate(baseUri.resolve("all-restaurants").toString());
-      }
-      addCandidate("https://gitam.sirixo.com/api/all-restaurants");
-      addCandidate("https://selfpos.sirixo.com/api/all-restaurants");
-      if (!_localhostPolicyLogged) {
-        _localhostPolicyLogged = true;
-        kioskLog(
-          'Running on localhost; trying same-origin restaurant endpoints first, '
-          'then remote fallback endpoints.',
-          tag: 'WEB_RESTAURANTS',
-        );
-      }
-      return candidates;
-    }
-
-    addCandidate(WebApiConfig.allRestaurantsUrl);
-    final baseUri = Uri.tryParse(WebApiConfig.baseUrl);
-    if (baseUri != null && baseUri.hasScheme && baseUri.hasAuthority) {
-      addCandidate(baseUri.resolve("all-restaurants").toString());
-    }
-    addCandidate("/api/all-restaurants");
-    addCandidate("api/all-restaurants");
-    addCandidate("https://gitam.sirixo.com/api/all-restaurants");
-    addCandidate("https://selfpos.sirixo.com/api/all-restaurants");
-
-    return candidates;
-  }
-
-  bool _isLocalDevHost(String host) {
-    final normalized = host.trim().toLowerCase();
-    return normalized == "localhost" ||
-        normalized == "127.0.0.1" ||
-        normalized == "::1" ||
-        normalized == "[::1]";
-  }
-
-  bool _isSameOrigin(Uri a, Uri b) {
-    return a.scheme.toLowerCase() == b.scheme.toLowerCase() &&
-        a.host.toLowerCase() == b.host.toLowerCase() &&
-        _effectivePort(a) == _effectivePort(b);
-  }
-
-  int _effectivePort(Uri uri) {
-    if (uri.hasPort) return uri.port;
-    if (uri.scheme == "https") return 443;
-    if (uri.scheme == "http") return 80;
-    return -1;
-  }
-
-  Future<void> _cacheRestaurants(List<Map<String, dynamic>> restaurants) async {
+  Future<void> _cacheRestaurants(
+      List<Map<String, dynamic>> restaurants, int branchId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_webRestaurantsCacheKey, jsonEncode(restaurants));
+      await prefs.setString(
+        _webRestaurantsScopedCacheKey(branchId),
+        jsonEncode(restaurants),
+      );
     } catch (_) {}
   }
 
-  Future<List<Map<String, dynamic>>> _readCachedRestaurants() async {
+  Future<List<Map<String, dynamic>>> _readCachedRestaurants(
+      int branchId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_webRestaurantsCacheKey);
+      final raw = prefs.getString(_webRestaurantsScopedCacheKey(branchId));
       if (raw == null || raw.trim().isEmpty) return const [];
       final decoded = jsonDecode(raw);
       if (decoded is! List) return const [];
@@ -323,13 +174,93 @@ class KioskApi {
     }
   }
 
+  Future<int> _currentWebRestaurantsBranchId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt("branch_id") ??
+        int.tryParse(prefs.getString("branch_id")?.trim() ?? "") ??
+        _defaultWebRestaurantsBranchId;
+  }
+
+  String _webRestaurantsScopedCacheKey(int branchId) {
+    return "${_webRestaurantsCacheKey}_branch_$branchId";
+  }
+
   // =========================================================
   // PRODUCTS
   // =========================================================
-  Future<Response> getProducts() async {
+  Future<Response> getProducts({bool forceRefresh = false}) async {
+    final restaurantKey = await _currentRestaurantCacheKey();
+    final memoryFresh = _productsMemoryCache != null &&
+        _productsMemoryRestaurantKey == restaurantKey &&
+        _productsMemoryCachedAt != null &&
+        DateTime.now().difference(_productsMemoryCachedAt!) <=
+            _productsCacheTtl;
+    if (!forceRefresh && memoryFresh) {
+      kioskLog(
+        "getProducts memory cache hit restaurant=$restaurantKey",
+        tag: "PRODUCTS_API",
+      );
+      return _productsMemoryCache!;
+    }
+
+    if (!forceRefresh) {
+      final diskCache = await _readCachedProducts(restaurantKey);
+      if (diskCache != null) {
+        _setProductsMemoryCache(diskCache, restaurantKey);
+        kioskLog(
+          "getProducts disk cache hit restaurant=$restaurantKey",
+          tag: "PRODUCTS_API",
+        );
+        unawaited(getProducts(forceRefresh: true));
+        return diskCache;
+      }
+    }
+
+    final pending = _productsInFlight;
+    if (pending != null && _productsInFlightRestaurantKey == restaurantKey) {
+      kioskLog(
+        "getProducts using in-flight request restaurant=$restaurantKey",
+        tag: "PRODUCTS_API",
+      );
+      return pending;
+    }
+
+    final future = _loadProductsFromNetwork(restaurantKey);
+    _productsInFlight = future;
+    _productsInFlightRestaurantKey = restaurantKey;
+    try {
+      return await future;
+    } finally {
+      if (identical(_productsInFlight, future)) {
+        _productsInFlight = null;
+        _productsInFlightRestaurantKey = null;
+      }
+    }
+  }
+
+  Future<void> warmProductsCache() async {
+    try {
+      await getProducts(forceRefresh: false);
+    } catch (e) {
+      kioskLog("warmProductsCache skipped: $e", tag: "PRODUCTS_API");
+    }
+  }
+
+  Future<Response> _loadProductsFromNetwork(String restaurantKey) async {
+    final timer = Stopwatch()..start();
     try {
       final dio = await DioClient.getAuthedDio();
       final res = await dio.get("kiosks/getProducts");
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        final recovered = await _recoverWebKioskAuthToken();
+        if (recovered) {
+          final retryDio = await DioClient.getAuthedDio();
+          final retryRes = await retryDio.get("kiosks/getProducts");
+          await _cacheProducts(retryRes, restaurantKey);
+          return retryRes;
+        }
+      }
+      await _cacheProducts(res, restaurantKey);
       return res;
     } catch (e) {
       if (kIsWeb) {
@@ -337,11 +268,84 @@ class KioskApi {
         if (recovered) {
           final dio = await DioClient.getAuthedDio();
           final res = await dio.get("kiosks/getProducts");
+          await _cacheProducts(res, restaurantKey);
           return res;
         }
       }
+      final cached = await _readCachedProducts(restaurantKey);
+      if (cached != null) return cached;
       rethrow;
+    } finally {
+      timer.stop();
+      kioskLog(
+        "getProducts network duration=${timer.elapsedMilliseconds}ms "
+        "restaurant=$restaurantKey",
+        tag: "PRODUCTS_API",
+      );
     }
+  }
+
+  Future<void> _cacheProducts(Response response, String restaurantKey) async {
+    final statusCode = response.statusCode ?? 0;
+    final data = response.data;
+    if (statusCode >= 400 || data == null) return;
+    _setProductsMemoryCache(response, restaurantKey);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _productsScopedCacheKey(restaurantKey),
+        jsonEncode({
+          "cached_at": DateTime.now().millisecondsSinceEpoch,
+          "data": data,
+        }),
+      );
+    } catch (_) {}
+  }
+
+  Future<Response?> _readCachedProducts(String restaurantKey) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_productsScopedCacheKey(restaurantKey));
+      if (raw == null || raw.trim().isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final cachedAtMs =
+          int.tryParse(decoded["cached_at"]?.toString() ?? "") ?? 0;
+      final cachedAt = DateTime.fromMillisecondsSinceEpoch(cachedAtMs);
+      if (DateTime.now().difference(cachedAt) > _productsCacheTtl) {
+        return null;
+      }
+      return Response(
+        requestOptions: RequestOptions(path: "kiosks/getProducts"),
+        statusCode: 200,
+        data: decoded["data"],
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _setProductsMemoryCache(Response response, String restaurantKey) {
+    _productsMemoryCache = response;
+    _productsMemoryRestaurantKey = restaurantKey;
+    _productsMemoryCachedAt = DateTime.now();
+  }
+
+  Future<String> _currentRestaurantCacheKey() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hash = prefs.getString("restaurant_hash")?.trim() ?? "";
+    final id = prefs.getString("restaurant_id")?.trim() ?? "";
+    if (hash.isNotEmpty) return hash;
+    if (id.isNotEmpty) return id;
+    return "default";
+  }
+
+  String _productsScopedCacheKey(String restaurantKey) {
+    final safeKey = restaurantKey
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
+    return "${_productsCacheKey}_$safeKey";
   }
 
   Future<bool> _recoverWebKioskAuthToken() async {
@@ -371,19 +375,40 @@ class KioskApi {
       final prefs = await SharedPreferences.getInstance();
       final restaurantId = prefs.getString("restaurant_id")?.trim() ?? "";
       final deviceId = prefs.getString("device_id")?.trim() ?? "";
+      final customerMobile = prefs.getString("customer_mobile")?.trim() ?? "";
+      final customerFirebaseUid =
+          prefs.getString("customer_firebase_uid")?.trim() ?? "";
+      final customerFirebaseToken =
+          prefs.getString("customer_firebase_token")?.trim() ?? "";
+      final customerBlockName =
+          prefs.getString("customer_block_name")?.trim() ?? "";
+      final branchId = prefs.getInt("branch_id");
       final body = <String, dynamic>{
         "orderType": orderType,
         "orderItemList": orderItems,
         if (restaurantId.isNotEmpty) "restaurant_id": restaurantId,
         if (deviceId.isNotEmpty) "device_id": deviceId,
+        if (customerMobile.isNotEmpty) "customer_mobile": customerMobile,
+        if (customerFirebaseUid.isNotEmpty)
+          "customer_firebase_uid": customerFirebaseUid,
+        if (customerBlockName.isNotEmpty)
+          "customer_block_name": customerBlockName,
+        if (branchId != null) "branch_id": branchId,
       };
       kioskLog(
         "createOrder orderType=$orderType items=${orderItems.length} "
         "restaurant_id=${restaurantId.isEmpty ? "-" : restaurantId} "
-        "device_id=${deviceId.isEmpty ? "-" : deviceId}",
+        "device_id=${deviceId.isEmpty ? "-" : deviceId} "
+        "customer_mobile=${customerMobile.isEmpty ? "-" : customerMobile}",
         tag: "ORDER_CREATE",
       );
-      return dio.post("kiosks/createOrder", data: body);
+      return dio.post(
+        "kiosks/createOrder",
+        data: body,
+        options: customerFirebaseToken.isEmpty
+            ? null
+            : Options(headers: {"X-Firebase-Id-Token": customerFirebaseToken}),
+      );
     }
 
     try {

@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
+import 'package:api_selfxo_project/core/device_layout.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
+import 'package:api_selfxo_project/screens/customer_restaurant_selection_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -33,7 +35,19 @@ class _SplashScreenState extends State<SplashScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final setupDone = prefs.getBool("kiosk_setup_done") ?? false;
+      final isTablet = isTabletContext(context);
       if (!mounted) return;
+
+      if (!isTablet) {
+        _didNavigate = true;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const CustomerRestaurantSelectionScreen(),
+          ),
+        );
+        return;
+      }
 
       if (_didNavigate) return;
       if (!setupDone) {

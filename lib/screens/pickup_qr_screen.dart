@@ -1,8 +1,11 @@
 import 'dart:async';
 
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
+import 'package:api_selfxo_project/core/device_layout.dart';
+import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -367,9 +370,14 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
   void _navigateHome() {
     if (!mounted || _isNavigating) return;
     _isNavigating = true;
+    final bool isTablet = !kIsWeb && isTabletContext(context);
     Navigator.pushAndRemoveUntil(
       context,
-      MaterialPageRoute(builder: (_) => const AdminHomeScreen()),
+      MaterialPageRoute(
+        builder: (_) => isTablet
+            ? const AdminHomeScreen()
+            : MainNavigation(orderType: widget.orderType ?? 'dine_in'),
+      ),
       (_) => false,
     );
   }
@@ -544,46 +552,6 @@ class _PickupQrScreenState extends State<PickupQrScreen> {
                               ),
                             ],
                             const SizedBox(height: 16),
-                            TextField(
-                              controller: _scanController,
-                              focusNode: _scanInputFocusNode,
-                              autofocus: true,
-                              autocorrect: false,
-                              enableSuggestions: false,
-                              keyboardType: TextInputType.text,
-                              textInputAction: TextInputAction.done,
-                              textAlign: TextAlign.center,
-                              onChanged: _handleScannerTextChanged,
-                              onSubmitted: _handleScannerSubmitted,
-                              decoration: InputDecoration(
-                                hintText: "Scanner input",
-                                filled: true,
-                                fillColor: const Color(0xFFF8FAFC),
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                  vertical: 12,
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFFCBD5E1),
-                                  ),
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFFCBD5E1),
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFF0EA5E9),
-                                    width: 2,
-                                  ),
-                                ),
-                              ),
-                            ),
                             const SizedBox(height: 14),
                             Row(
                               children: [
