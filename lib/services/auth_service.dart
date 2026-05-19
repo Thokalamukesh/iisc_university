@@ -93,7 +93,7 @@ class AuthService {
     );
     final endpoints = <String>[
       WebApiConfig.allRestaurantsUrl,
-      "https://gitam.sirixo.com/api/all-restaurants",
+      "http://127.0.0.1:8000/api/all-restaurants",
     ];
     for (final endpoint in endpoints) {
       final uri = Uri.tryParse(endpoint);
@@ -236,6 +236,10 @@ class AuthService {
       if (force) {
         _log("🧹 Force mode → clearing old kiosk token");
         await prefs.remove("auth_token");
+        for (final rKey in registrationRestaurantKeys) {
+          final sKey = _scopedAuthTokenKey([rKey]);
+          await prefs.remove(sKey);
+        }
       }
 
       final scopedToken = prefs.getString(scopedTokenKey)?.trim() ?? "";

@@ -1,19 +1,22 @@
 import 'dart:async';
 
 import 'package:api_selfxo_project/screens/block_screen.dart';
-import 'package:api_selfxo_project/services/customer_phone_auth_service.dart';
+import 'package:api_selfxo_project/services/firebase_auth_service.dart';
+import 'package:api_selfxo_project/services/pwa_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 class FoodOtpVerifyScreen extends StatefulWidget {
   final String mobileNumber;
-  final CustomerOtpSession otpSession;
+  final FirebaseOtpSession otpSession;
+  final String customerName; // optional — may be empty
   final WidgetBuilder? afterVerifiedBuilder;
 
   const FoodOtpVerifyScreen({
     super.key,
     required this.mobileNumber,
     required this.otpSession,
+    this.customerName = '',
     this.afterVerifiedBuilder,
   });
 
@@ -28,13 +31,14 @@ class _FoodOtpVerifyScreenState extends State<FoodOtpVerifyScreen> {
   final TextEditingController otpController = TextEditingController();
   final FocusNode otpFocusNode = FocusNode();
   Timer? _timer;
-  late CustomerOtpSession _session;
+  late FirebaseOtpSession _session;
 
   int _secondsLeft = 30;
   bool _verifying = false;
   bool _resending = false;
   bool _loginCompleted = false;
   String? _errorText;
+  String? _statusText;
 
   String get _otp => otpController.text;
 
@@ -87,14 +91,32 @@ class _FoodOtpVerifyScreenState extends State<FoodOtpVerifyScreen> {
     setState(() {
       _verifying = true;
       _errorText = null;
+      _statusText = "Verifying OTP...";
     });
 
     try {
-      await CustomerPhoneAuthService.instance.verifyOtp(
+      // Step 1: Verify OTP with Firebase → get Firebase ID token
+      debugPrint("[OTP] Verifying with Firebase...");
+      final firebaseIdToken = await FirebaseAuthService.instance.verifyOtp(
         session: _session,
         otp: otp,
       );
-      debugPrint("[OTP] Verify completed.");
+      debugPrint("[OTP] Firebase verify completed. Token length=${firebaseIdToken.length}");
+
+      if (!mounted) return;
+      setState(() => _statusText = "Logging in...");
+
+      // Step 2: Exchange Firebase ID token for Sanctum token via Laravel
+      final firebaseUid = FirebaseAuthService.instance.currentUid ?? '';
+      debugPrint("[OTP] Calling Laravel login API...");
+      await PwaAuthService.instance.login(
+        firebaseIdToken: firebaseIdToken,
+        firebaseUid: firebaseUid,
+        customerName: widget.customerName,
+      );
+      debugPrint("[OTP] Laravel login completed. Sanctum token stored.");
+
+      // Step 3: Navigate to dashboard
       await _finishLogin();
     } catch (e) {
       debugPrint("[OTP] Verify failed: $e");
@@ -102,6 +124,7 @@ class _FoodOtpVerifyScreenState extends State<FoodOtpVerifyScreen> {
       setState(() {
         _errorText = _readableError(e);
         _verifying = false;
+        _statusText = null;
       });
     }
   }
@@ -112,10 +135,15 @@ class _FoodOtpVerifyScreenState extends State<FoodOtpVerifyScreen> {
     setState(() {
       _resending = true;
       _errorText = null;
+      _statusText = "Resending OTP...";
     });
 
     try {
-      _session = await CustomerPhoneAuthService.instance.sendOtp(
+      // Rate limit check first
+      await PwaAuthService.instance.checkRateLimit(widget.mobileNumber);
+
+      // Resend via Firebase
+      _session = await FirebaseAuthService.instance.sendOtp(
         widget.mobileNumber,
       );
       otpController.clear();
@@ -123,13 +151,17 @@ class _FoodOtpVerifyScreenState extends State<FoodOtpVerifyScreen> {
       _startTimer();
       debugPrint("[OTP] Resend completed.");
       if (!mounted) return;
+      setState(() => _statusText = null);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("OTP resent")),
       );
     } catch (e) {
       debugPrint("[OTP] Resend failed: $e");
       if (!mounted) return;
-      setState(() => _errorText = _readableError(e));
+      setState(() {
+        _errorText = _readableError(e);
+        _statusText = null;
+      });
     } finally {
       if (mounted) setState(() => _resending = false);
     }
@@ -308,6 +340,27 @@ class _FoodOtpVerifyScreenState extends State<FoodOtpVerifyScreen> {
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
                 ),
+              ),
+            ],
+            if (_statusText != null) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _statusText!,
+                    style: const TextStyle(
+                      color: Color(0xFF395B2E),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
               ),
             ],
             const SizedBox(height: 22),

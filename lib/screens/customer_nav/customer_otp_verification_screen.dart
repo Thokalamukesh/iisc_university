@@ -1,7 +1,8 @@
 import 'dart:async';
 
 import 'package:api_selfxo_project/screens/customer_nav/customer_auth_layout.dart';
-import 'package:api_selfxo_project/services/customer_phone_auth_service.dart';
+import 'package:api_selfxo_project/services/firebase_auth_service.dart';
+import 'package:api_selfxo_project/services/pwa_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,7 +10,7 @@ const Color _snackGreen = Color(0xFF2E7D32);
 
 class CustomerOtpVerificationScreen extends StatefulWidget {
   final String mobileNumber;
-  final CustomerOtpSession otpSession;
+  final FirebaseOtpSession otpSession;
 
   const CustomerOtpVerificationScreen({
     super.key,
@@ -30,7 +31,7 @@ class _CustomerOtpVerificationScreenState
   int _secondsLeft = 30;
   bool _verifying = false;
   bool _resending = false;
-  late CustomerOtpSession _otpSession;
+  late FirebaseOtpSession _otpSession;
 
   String get _otp => _otpController.text;
 
@@ -76,8 +77,9 @@ class _CustomerOtpVerificationScreenState
     setState(() => _resending = true);
     _otpController.clear();
     try {
+      await PwaAuthService.instance.checkRateLimit(widget.mobileNumber);
       _otpSession =
-          await CustomerPhoneAuthService.instance.sendOtp(widget.mobileNumber);
+          await FirebaseAuthService.instance.sendOtp(widget.mobileNumber);
       _otpFocusNode.requestFocus();
       _startTimer();
       if (!mounted) return;
@@ -115,9 +117,17 @@ class _CustomerOtpVerificationScreenState
 
     setState(() => _verifying = true);
     try {
-      await CustomerPhoneAuthService.instance.verifyOtp(
+      // Step 1: Verify OTP with Firebase → get ID token
+      final firebaseIdToken = await FirebaseAuthService.instance.verifyOtp(
         session: _otpSession,
         otp: _otp,
+      );
+
+      // Step 2: Exchange Firebase ID token for Sanctum token
+      final firebaseUid = FirebaseAuthService.instance.currentUid ?? '';
+      await PwaAuthService.instance.login(
+        firebaseIdToken: firebaseIdToken,
+        firebaseUid: firebaseUid,
       );
     } catch (e) {
       if (!mounted) return;

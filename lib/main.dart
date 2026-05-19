@@ -7,12 +7,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
+import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/firebase_options.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
+import 'package:api_selfxo_project/screens/block_screen.dart';
 import 'package:api_selfxo_project/screens/login_screen.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
+import 'package:api_selfxo_project/services/pwa_auth_service.dart';
+import 'package:api_selfxo_project/services/session_manager.dart';
 import 'package:api_selfxo_project/widget/pos_payment_success_dialog.dart';
 import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
@@ -193,7 +197,7 @@ Future<void> main() async {
 }
 
 Widget _resolveInitialWebHome() {
-  return const FoodOtpLoginScreen();
+  return const _WebSessionGate();
 }
 
 class WebCustomerApp extends StatefulWidget {
@@ -221,6 +225,102 @@ class _WebCustomerAppState extends State<WebCustomerApp> {
       debugShowCheckedModeBanner: false,
       home: _resolveInitialWebHome(),
     );
+  }
+}
+
+/// Session gate for web/PWA.
+///
+/// On startup:
+/// 1. Checks SharedPreferences for a stored Sanctum token.
+/// 2. If found, calls GET /restore-session to validate.
+/// 3. If valid → navigates to CustomerBlockScreen (dashboard).
+/// 4. If invalid or missing → shows FoodOtpLoginScreen.
+///
+/// Target: session restore under 1 second.
+class _WebSessionGate extends StatefulWidget {
+  const _WebSessionGate();
+
+  @override
+  State<_WebSessionGate> createState() => _WebSessionGateState();
+}
+
+class _WebSessionGateState extends State<_WebSessionGate> {
+  bool _checking = true;
+  bool _sessionValid = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _tryRestoreSession();
+  }
+
+  Future<void> _tryRestoreSession() async {
+    final timer = Stopwatch()..start();
+    try {
+      final hasToken = await SessionManager.instance.hasSession();
+      if (!hasToken) {
+        debugPrint('[SESSION_GATE] No stored token → login screen');
+        if (mounted) setState(() { _checking = false; _sessionValid = false; });
+        return;
+      }
+
+      debugPrint('[SESSION_GATE] Token found → validating with backend...');
+      final customer = await PwaAuthService.instance.restoreSession();
+      timer.stop();
+      debugPrint('[SESSION_GATE] restoreSession completed in ${timer.elapsedMilliseconds}ms');
+
+      if (customer != null) {
+        debugPrint('[SESSION_GATE] Session valid → dashboard');
+        if (mounted) setState(() { _checking = false; _sessionValid = true; });
+      } else {
+        debugPrint('[SESSION_GATE] Session invalid → login screen');
+        if (mounted) setState(() { _checking = false; _sessionValid = false; });
+      }
+    } catch (e) {
+      debugPrint('[SESSION_GATE] Error during restore: $e');
+      if (mounted) setState(() { _checking = false; _sessionValid = false; });
+    }
+  }
+
+
+
+  @override
+  Widget build(BuildContext context) {
+    if (_checking) {
+      return const Scaffold(
+        backgroundColor: Color(0xFFF6F6F7),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 48,
+                height: 48,
+                child: CircularProgressIndicator(
+                  strokeWidth: 3,
+                  color: Color(0xFF9F342C),
+                ),
+              ),
+              SizedBox(height: 16),
+              Text(
+                'Loading...',
+                style: TextStyle(
+                  color: Colors.black54,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_sessionValid) {
+      return const CustomerBlockScreen();
+    }
+
+    return const FoodOtpLoginScreen();
   }
 }
 

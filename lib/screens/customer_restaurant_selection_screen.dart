@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:api_selfxo_project/api/kiosk_api.dart';
+import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:api_selfxo_project/core/fast_page_route.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/screens/block_screen.dart';
@@ -127,11 +128,14 @@ class _CustomerRestaurantSelectionScreenState
         continue;
       }
 
-      final path = raw.startsWith("/") ? raw.substring(1) : raw;
-      for (final prefix in const [
-        "https://gitam.sirixo.com/storage/",
-        "https://gitam.sirixo.com/",
-      ]) {
+      final path = raw.startsWith('/') ? raw.substring(1) : raw;
+      // Derive storage base from the configured API base URL
+      final apiBase = WebApiConfig.baseUrl.endsWith('/')
+          ? WebApiConfig.baseUrl
+          : '${WebApiConfig.baseUrl}/';
+      final storageBase =
+          apiBase.replaceFirst(RegExp(r'api/?$'), 'storage/');
+      for (final prefix in [storageBase, apiBase]) {
         final url = Uri.encodeFull("$prefix$path");
         if (seen.add(url)) candidates.add(url);
       }

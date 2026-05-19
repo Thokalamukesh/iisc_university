@@ -1,5 +1,5 @@
 class WebApiConfig {
-  static const String defaultBaseUrl = "https://gitam.sirixo.com/api/";
+  static const String defaultBaseUrl = "http://127.0.0.1:8000/api/";
   static const String defaultRestaurantsUrl =
       "${defaultBaseUrl}pwa/groups-restaurants";
 

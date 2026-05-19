@@ -354,10 +354,10 @@ class KioskApi {
       final restaurantId = prefs.getString("restaurant_id")?.trim() ?? "";
       if (restaurantId.isEmpty) return false;
       kioskLog(
-        "auth token missing while loading menu; trying background kiosk auth recovery",
+        "auth token missing or invalid while loading menu; forcing background kiosk auth recovery",
         tag: 'WEB_RESTAURANTS',
       );
-      return await AuthService().initializeKiosk(force: false);
+      return await AuthService().initializeKiosk(force: true);
     } catch (_) {
       return false;
     }

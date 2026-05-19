@@ -9,7 +9,7 @@ import 'package:api_selfxo_project/core/connectivity_service.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
 
 class DioClient {
-  static const String _defaultBaseUrl = "https://gitam.sirixo.com/api/";
+  static const String _defaultBaseUrl = "http://127.0.0.1:8000/api/";
   static const String baseUrl = String.fromEnvironment(
     "SELFX_IO_API_BASE_URL",
     defaultValue: _defaultBaseUrl,

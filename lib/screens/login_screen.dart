@@ -1,5 +1,6 @@
 import 'package:api_selfxo_project/screens/otp_screen.dart';
-import 'package:api_selfxo_project/services/customer_phone_auth_service.dart';
+import 'package:api_selfxo_project/services/firebase_auth_service.dart';
+import 'package:api_selfxo_project/services/pwa_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -22,6 +23,7 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
       String.fromEnvironment("SELFX_BUILD_STAMP", defaultValue: "local");
 
   final TextEditingController phoneController = TextEditingController();
+  final TextEditingController nameController = TextEditingController();
   final FocusNode phoneFocusNode = FocusNode();
 
   String? errorText;
@@ -29,13 +31,9 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
   bool _sendingOtp = false;
 
   @override
-  void initState() {
-    super.initState();
-  }
-
-  @override
   void dispose() {
     phoneController.dispose();
+    nameController.dispose();
     phoneFocusNode.dispose();
     super.dispose();
   }
@@ -57,13 +55,31 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
     setState(() {
       _sendingOtp = true;
       errorText = null;
-      _statusText = "Sending OTP to +91 $mobile...";
+      _statusText = "Checking rate limit...";
     });
 
-    CustomerOtpSession session;
+    // Step 1: Rate limit check against Laravel backend
+    try {
+      await PwaAuthService.instance.checkRateLimit(mobile);
+    } catch (e) {
+      debugPrint("[OTP] Rate limit check failed: $e");
+      if (!mounted) return;
+      setState(() {
+        _sendingOtp = false;
+        errorText = _readableError(e);
+        _statusText = null;
+      });
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() => _statusText = "Sending OTP to +91 $mobile...");
+
+    // Step 2: Send OTP via Firebase
+    FirebaseOtpSession session;
     try {
       debugPrint("[OTP] Calling Firebase sendOtp for +91$mobile");
-      session = await CustomerPhoneAuthService.instance.sendOtp(mobile);
+      session = await FirebaseAuthService.instance.sendOtp(mobile);
       debugPrint("[OTP] Firebase sendOtp completed.");
     } catch (e) {
       debugPrint("[OTP] Firebase sendOtp failed: $e");
@@ -82,12 +98,14 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
       _statusText = "OTP sent. Opening verification screen...";
     });
 
+    // Step 3: Navigate to OTP verify screen, passing the optional name
     try {
       await Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => FoodOtpVerifyScreen(
             mobileNumber: mobile,
             otpSession: session,
+            customerName: nameController.text.trim(),
             afterVerifiedBuilder: widget.afterVerifiedBuilder,
           ),
         ),
@@ -99,7 +117,8 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
       debugPrintStack(stackTrace: stack);
       if (!mounted) return;
       setState(() {
-        errorText = "OTP was sent, but the verification screen could not open. Please refresh and try again.";
+        errorText =
+            "OTP was sent, but the verification screen could not open. Please refresh and try again.";
         _statusText = null;
       });
     }
@@ -235,6 +254,42 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // --- Optional Name field ---
+          const Text(
+            "Your Name",
+            style: TextStyle(
+              color: Color(0xFF151518),
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 6),
+          TextField(
+            controller: nameController,
+            keyboardType: TextInputType.name,
+            textCapitalization: TextCapitalization.words,
+            textInputAction: TextInputAction.next,
+            onSubmitted: (_) => phoneFocusNode.requestFocus(),
+            decoration: InputDecoration(
+              counterText: "",
+              hintText: "e.g. Kumar  (optional)",
+              hintStyle: TextStyle(color: Colors.grey.shade400),
+              filled: true,
+              fillColor: const Color(0xFFF5F5F6),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(color: Color(0xFFE7E7EA)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(color: primary, width: 1.4),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          // --- Mobile number section ---
           Row(
             children: [
               Container(

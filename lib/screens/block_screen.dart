@@ -1,13 +1,77 @@
+import 'dart:convert';
+
+import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:api_selfxo_project/core/fast_page_route.dart';
+import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/screens/customer_restaurant_selection_screen.dart';
 import 'package:api_selfxo_project/screens/customer_nav/customer_account_screen.dart';
 import 'package:api_selfxo_project/screens/customer_nav/customer_offers_screen.dart';
 import 'package:api_selfxo_project/screens/customer_nav/customer_orders_screen.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// ─── Accent palette cycling for dynamically-fetched groups ───────────────────
+const List<Color> _kGroupAccents = [
+  Color(0xFF2D9CDB),
+  Color(0xFF00A884),
+  Color(0xFFFF9800),
+  Color(0xFF8B5CF6),
+  Color(0xFFEC4899),
+  Color(0xFF10B981),
+];
+
+Color _accentFor(int index) => _kGroupAccents[index % _kGroupAccents.length];
+
+// ─── Data model (populated from API) ─────────────────────────────────────────
+class _CustomerBlock {
+  final int id;
+  final String name;
+  final int cafes;
+  final Color accent;
+
+  const _CustomerBlock({
+    required this.id,
+    required this.name,
+    required this.cafes,
+    required this.accent,
+  });
+
+  factory _CustomerBlock.fromJson(Map<String, dynamic> json, int index) {
+    final restaurants = (json['restaurants'] as List?)?.length ?? 0;
+    return _CustomerBlock(
+      id: (json['group_id'] as num).toInt(),
+      name: json['group_name']?.toString() ?? 'Block ${index + 1}',
+      cafes: restaurants,
+      accent: _accentFor(index),
+    );
+  }
+}
+
+// ─── Screen ───────────────────────────────────────────────────────────────────
 class CustomerBlockScreen extends StatefulWidget {
   const CustomerBlockScreen({super.key});
+
+  /// Called by the session gate to pre-populate the block cache
+  /// so the blocks screen renders without any spinner on first visit.
+  static void warmCache(List<dynamic> rawGroups) {
+    _CustomerBlockScreenState._cachedBlocks = rawGroups
+        .asMap()
+        .entries
+        .map((e) {
+          try {
+            return _CustomerBlock.fromJson(
+              Map<String, dynamic>.from(e.value as Map),
+              e.key,
+            );
+          } catch (_) {
+            return null;
+          }
+        })
+        .whereType<_CustomerBlock>()
+        .toList();
+    _CustomerBlockScreenState._cacheTime = DateTime.now();
+  }
 
   @override
   State<CustomerBlockScreen> createState() => _CustomerBlockScreenState();
@@ -21,24 +85,14 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
   static const Color _mutedTextColor = Color(0xFF737783);
   static const Color _surfaceColor = Color(0xFFF7F8FB);
 
-  final List<_CustomerBlock> _blocks = const [
-    _CustomerBlock(
-      id: 1,
-      name: "1st floor",
-      description: "Group 1",
-      cafes: 1,
-      serviceLabel: "Fast Service",
-      accent: Color(0xFF2D9CDB),
-    ),
-    _CustomerBlock(
-      id: 2,
-      name: "2nd floor",
-      description: "Group 2",
-      cafes: 1,
-      serviceLabel: "Fast Service",
-      accent: Color(0xFF00A884),
-    ),
-  ];
+  // ── In-memory cache so revisiting the screen is instant ──────────────────
+  static List<_CustomerBlock>? _cachedBlocks;
+  static DateTime? _cacheTime;
+  static const _cacheTtl = Duration(minutes: 5);
+
+  List<_CustomerBlock> _blocks = [];
+  bool _loading = true;
+  String? _error;
 
   int? _selectedBranchId;
   int _selectedBottomIndex = 0;
@@ -47,29 +101,119 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
   @override
   void initState() {
     super.initState();
-    _restoreSelectedBlock();
+    _loadBlocksFromApi();
   }
 
-  Future<void> _restoreSelectedBlock() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedBranchId = prefs.getInt("branch_id");
-    if (savedBranchId != null &&
-        !_blocks.any((block) => block.id == savedBranchId)) {
-      await prefs.remove("branch_id");
-      await prefs.remove("customer_block_name");
+  Future<void> _loadBlocksFromApi() async {
+    // ── Serve from memory cache if it's fresh ────────────────────────────────
+    final cached = _cachedBlocks;
+    final cachedAt = _cacheTime;
+    if (cached != null &&
+        cachedAt != null &&
+        DateTime.now().difference(cachedAt) < _cacheTtl) {
+      final prefs = await SharedPreferences.getInstance();
+      final savedBranchId = prefs.getInt('branch_id');
+      final validSaved =
+          savedBranchId != null && cached.any((b) => b.id == savedBranchId)
+              ? savedBranchId
+              : null;
+      if (!mounted) return;
+      setState(() {
+        _blocks = cached;
+        _selectedBranchId = validSaved;
+        _loading = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 12),
+          headers: const {'Accept': 'application/json'},
+          validateStatus: (s) => s != null && s < 500,
+        ),
+      );
+
+      final url = WebApiConfig.allRestaurantsUrl;
+      kioskLog('Fetching groups from $url', tag: 'BLOCK_SCREEN');
+      final res = await dio.get(url);
+
+      if ((res.statusCode ?? 0) >= 400) {
+        throw Exception('Server returned ${res.statusCode}');
+      }
+
+      final rawData = res.data;
+      List<dynamic> list;
+      if (rawData is List) {
+        list = rawData;
+      } else if (rawData is String) {
+        list = jsonDecode(rawData) as List<dynamic>;
+      } else if (rawData is Map && rawData.containsKey('data')) {
+        list = rawData['data'] as List<dynamic>;
+      } else {
+        list = [];
+      }
+
+      final blocks = list
+          .asMap()
+          .entries
+          .map((e) => _CustomerBlock.fromJson(
+                Map<String, dynamic>.from(e.value as Map),
+                e.key,
+              ))
+          .toList();
+
+      kioskLog('Loaded ${blocks.length} groups', tag: 'BLOCK_SCREEN');
+
+      // Restore previously saved branch if still valid
+      final prefs = await SharedPreferences.getInstance();
+      final savedBranchId = prefs.getInt('branch_id');
+      final validSaved =
+          savedBranchId != null && blocks.any((b) => b.id == savedBranchId)
+              ? savedBranchId
+              : null;
+      if (savedBranchId != null && validSaved == null) {
+        await prefs.remove('branch_id');
+        await prefs.remove('customer_block_name');
+      }
+
+      if (!mounted) return;
+      // \u2500\u2500 Write to static cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+      _cachedBlocks = blocks;
+      _cacheTime = DateTime.now();
+      setState(() {
+        _blocks = blocks;
+        _selectedBranchId = validSaved;
+        _loading = false;
+      });
+    } catch (e, st) {
+      kioskLogError('Failed to load groups: $e',
+          tag: 'BLOCK_SCREEN', error: e, stackTrace: st);
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Unable to load blocks. Please check your connection.';
+      });
     }
   }
 
-  Future<void> _selectBlock(_CustomerBlock selectedBlock) async {
+  Future<void> _selectBlock(_CustomerBlock block) async {
     if (_saving) return;
     setState(() {
-      _selectedBranchId = selectedBlock.id;
+      _selectedBranchId = block.id;
       _saving = true;
     });
 
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt("branch_id", selectedBlock.id);
-    await prefs.setString("customer_block_name", selectedBlock.name);
+    await prefs.setInt('branch_id', block.id);
+    await prefs.setString('customer_block_name', block.name);
 
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
@@ -93,13 +237,13 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
         currentIndex: _selectedBottomIndex,
         onTap: (index) => setState(() => _selectedBottomIndex = index),
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: "Home"),
+          BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: 'Home'),
           BottomNavigationBarItem(
-              icon: Icon(Icons.assignment_outlined), label: "Orders"),
+              icon: Icon(Icons.assignment_outlined), label: 'Orders'),
           BottomNavigationBarItem(
-              icon: Icon(Icons.local_offer_outlined), label: "Offers"),
+              icon: Icon(Icons.local_offer_outlined), label: 'Offers'),
           BottomNavigationBarItem(
-              icon: Icon(Icons.person_outline), label: "Account"),
+              icon: Icon(Icons.person_outline), label: 'Account'),
         ],
       ),
     );
@@ -147,7 +291,7 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
                       const _CampusCard(),
                       const SizedBox(height: 14),
                       const Text(
-                        "Available Blocks",
+                        'Available Blocks',
                         style: TextStyle(
                           color: _textColor,
                           fontSize: 16,
@@ -155,16 +299,41 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
                         ),
                       ),
                       const SizedBox(height: 10),
-                      if (isWide)
+                      if (_loading)
+                        const Center(
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(vertical: 40),
+                            child: CircularProgressIndicator(),
+                          ),
+                        )
+                      else if (_error != null)
+                        _ErrorState(
+                          message: _error!,
+                          onRetry: _loadBlocksFromApi,
+                        )
+                      else if (_blocks.isEmpty)
+                        const Center(
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(vertical: 40),
+                            child: Text(
+                              'No blocks available at the moment.',
+                              style: TextStyle(
+                                color: _mutedTextColor,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        )
+                      else if (isWide)
                         Wrap(
                           spacing: 12,
                           runSpacing: 12,
                           children: _blocks.map((block) {
                             return SizedBox(
-                              width: (contentWidth -
-                                      (horizontalPadding * 2) -
-                                      12) /
-                                  2,
+                              width:
+                                  (contentWidth - (horizontalPadding * 2) - 12) /
+                                      2,
                               child: _BlockCard(
                                 block: block,
                                 selected: _selectedBranchId == block.id,
@@ -199,12 +368,59 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
 
   void _handleBack() {
     final navigator = Navigator.of(context);
-    if (navigator.canPop()) {
-      navigator.pop();
-    }
+    if (navigator.canPop()) navigator.pop();
   }
 }
 
+// ─── Error state ──────────────────────────────────────────────────────────────
+class _ErrorState extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+
+  const _ErrorState({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.wifi_off_rounded,
+                size: 48, color: Color(0xFFBDBDBD)),
+            const SizedBox(height: 12),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF737783),
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: const Text('Retry'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFF365A),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Hero header ──────────────────────────────────────────────────────────────
 class _HeroHeader extends StatelessWidget {
   final VoidCallback onBack;
 
@@ -237,7 +453,7 @@ class _HeroHeader extends StatelessWidget {
                 _BackButton(onTap: onBack),
                 const SizedBox(height: 10),
                 const Text(
-                  "Select Your\nCanteen Block",
+                  'Select Your\nCanteen Block',
                   style: TextStyle(
                     color: _CustomerBlockScreenState._textColor,
                     fontSize: 25,
@@ -247,7 +463,7 @@ class _HeroHeader extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  "Pick your block to view available restaurants and services.",
+                  'Pick your block to view available restaurants and services.',
                   style: TextStyle(
                     color: Color(0xFF5F6470),
                     fontSize: 13,
@@ -331,6 +547,11 @@ class _CampusIllustration extends StatelessWidget {
                 _CustomerBlockScreenState._campusImageAsset,
                 fit: BoxFit.cover,
                 alignment: Alignment.center,
+                errorBuilder: (_, __, ___) => const Icon(
+                  Icons.school_rounded,
+                  size: 48,
+                  color: Color(0xFFFF365A),
+                ),
               ),
             ),
           ),
@@ -373,7 +594,7 @@ class _CampusIllustration extends StatelessWidget {
             ),
             alignment: Alignment.center,
             child: const Text(
-              "IISC Campus",
+              'IISC Campus',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
@@ -446,6 +667,11 @@ class _CampusCard extends StatelessWidget {
                   _CustomerBlockScreenState._campusImageAsset,
                   fit: BoxFit.cover,
                   alignment: Alignment.center,
+                  errorBuilder: (_, __, ___) => const Icon(
+                    Icons.school_rounded,
+                    size: 28,
+                    color: Color(0xFFFF365A),
+                  ),
                 ),
               ),
             ),
@@ -457,7 +683,7 @@ class _CampusCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  "Current Campus",
+                  'Current Campus',
                   style: TextStyle(
                     color: _CustomerBlockScreenState._mutedTextColor,
                     fontSize: 12,
@@ -466,7 +692,7 @@ class _CampusCard extends StatelessWidget {
                 ),
                 SizedBox(height: 2),
                 Text(
-                  "Indian Institute of Science(IISC)",
+                  'Indian Institute of Science (IISC)',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -484,6 +710,7 @@ class _CampusCard extends StatelessWidget {
   }
 }
 
+// ─── Block card ───────────────────────────────────────────────────────────────
 class _BlockCard extends StatelessWidget {
   final _CustomerBlock block;
   final bool selected;
@@ -538,32 +765,15 @@ class _BlockCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                block.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: _CustomerBlockScreenState._textColor,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                block.description,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color:
-                                      _CustomerBlockScreenState._mutedTextColor,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ],
+                          child: Text(
+                            block.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: _CustomerBlockScreenState._textColor,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w900,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -585,13 +795,13 @@ class _BlockCard extends StatelessWidget {
                       children: [
                         _BlockStat(
                           icon: Icons.restaurant_rounded,
-                          value: "${block.cafes}",
-                          label: block.cafes == 1 ? "Cafe" : "Cafes",
+                          value: '${block.cafes}',
+                          label: block.cafes == 1 ? 'Cafe' : 'Cafes',
                         ),
-                        _BlockStat(
+                        const _BlockStat(
                           icon: Icons.bolt_rounded,
-                          value: "",
-                          label: block.serviceLabel,
+                          value: '',
+                          label: 'Fast Service',
                         ),
                       ],
                     ),
@@ -652,11 +862,7 @@ class _BlockStat extends StatelessWidget {
       width: 82,
       child: Row(
         children: [
-          Icon(
-            icon,
-            size: 17,
-            color: const Color(0xFF6E7280),
-          ),
+          Icon(icon, size: 17, color: const Color(0xFF6E7280)),
           const SizedBox(width: 5),
           Flexible(
             child: RichText(
@@ -672,7 +878,7 @@ class _BlockStat extends StatelessWidget {
                 children: [
                   if (value.isNotEmpty)
                     TextSpan(
-                      text: "$value\n",
+                      text: '$value\n',
                       style: const TextStyle(
                         color: _CustomerBlockScreenState._textColor,
                         fontSize: 12,
@@ -766,25 +972,6 @@ class _BlockThumbnailPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _BlockThumbnailPainter oldDelegate) {
-    return oldDelegate.accent != accent;
-  }
-}
-
-class _CustomerBlock {
-  final int id;
-  final String name;
-  final String description;
-  final int cafes;
-  final String serviceLabel;
-  final Color accent;
-
-  const _CustomerBlock({
-    required this.id,
-    required this.name,
-    required this.description,
-    required this.cafes,
-    required this.serviceLabel,
-    required this.accent,
-  });
+  bool shouldRepaint(covariant _BlockThumbnailPainter oldDelegate) =>
+      oldDelegate.accent != accent;
 }

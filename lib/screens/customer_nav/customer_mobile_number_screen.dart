@@ -1,6 +1,7 @@
 import 'package:api_selfxo_project/screens/customer_nav/customer_auth_layout.dart';
 import 'package:api_selfxo_project/screens/customer_nav/customer_otp_verification_screen.dart';
-import 'package:api_selfxo_project/services/customer_phone_auth_service.dart';
+import 'package:api_selfxo_project/services/firebase_auth_service.dart';
+import 'package:api_selfxo_project/services/pwa_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -45,9 +46,10 @@ class _CustomerMobileNumberScreenState
       _sendingOtp = true;
     });
 
-    CustomerOtpSession otpSession;
+    FirebaseOtpSession otpSession;
     try {
-      otpSession = await CustomerPhoneAuthService.instance.sendOtp(mobile);
+      await PwaAuthService.instance.checkRateLimit(mobile);
+      otpSession = await FirebaseAuthService.instance.sendOtp(mobile);
     } catch (e) {
       if (!mounted) return;
       setState(() => _sendingOtp = false);

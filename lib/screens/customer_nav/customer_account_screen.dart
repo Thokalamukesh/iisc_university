@@ -1,8 +1,7 @@
 import 'package:api_selfxo_project/screens/customer_nav/customer_mobile_number_screen.dart';
-import 'package:api_selfxo_project/api/dio_client.dart';
-import 'package:dio/dio.dart';
+import 'package:api_selfxo_project/services/pwa_auth_service.dart';
+import 'package:api_selfxo_project/services/session_manager.dart';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 class CustomerAccountScreen extends StatefulWidget {
   const CustomerAccountScreen({super.key});
@@ -13,6 +12,7 @@ class CustomerAccountScreen extends StatefulWidget {
 
 class _CustomerAccountScreenState extends State<CustomerAccountScreen> {
   String? _mobileNumber;
+  String? _customerName;
   bool _verified = false;
 
   @override
@@ -22,11 +22,14 @@ class _CustomerAccountScreenState extends State<CustomerAccountScreen> {
   }
 
   Future<void> _loadCustomerProfile() async {
-    final prefs = await SharedPreferences.getInstance();
+    final mobile = await SessionManager.instance.getCustomerMobile();
+    final customer = await SessionManager.instance.getCustomer();
+    final hasSession = await SessionManager.instance.hasSession();
     if (!mounted) return;
     setState(() {
-      _mobileNumber = prefs.getString("customer_mobile");
-      _verified = prefs.getBool("customer_mobile_verified") ?? false;
+      _mobileNumber = mobile;
+      _customerName = customer?['name']?.toString();
+      _verified = hasSession && (mobile?.isNotEmpty ?? false);
     });
   }
 
@@ -41,24 +44,11 @@ class _CustomerAccountScreenState extends State<CustomerAccountScreen> {
   }
 
   Future<void> _signOut() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString("customer_sanctum_token")?.trim() ?? "";
-    if (token.isNotEmpty) {
-      try {
-        await DioClient.getDio().post(
-          "pwa/logout",
-          options: Options(headers: {"Authorization": "Bearer $token"}),
-        );
-      } catch (_) {}
-    }
-    await prefs.remove("customer_mobile");
-    await prefs.remove("customer_mobile_verified");
-    await prefs.remove("customer_firebase_uid");
-    await prefs.remove("customer_firebase_token");
-    await prefs.remove("customer_sanctum_token");
+    await PwaAuthService.instance.logout();
     if (!mounted) return;
     setState(() {
       _mobileNumber = null;
+      _customerName = null;
       _verified = false;
     });
   }
@@ -107,7 +97,11 @@ class _CustomerAccountScreenState extends State<CustomerAccountScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              signedIn ? "+91 $_mobileNumber" : "Guest",
+                              signedIn
+                                  ? (_customerName?.isNotEmpty == true
+                                      ? _customerName!
+                                      : "+91 $_mobileNumber")
+                                  : "Guest",
                               style: const TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.w800,
@@ -116,7 +110,9 @@ class _CustomerAccountScreenState extends State<CustomerAccountScreen> {
                             const SizedBox(height: 3),
                             Text(
                               signedIn
-                                  ? "Mobile number verified"
+                                  ? (_customerName?.isNotEmpty == true
+                                      ? "+91 $_mobileNumber"
+                                      : "Mobile number verified")
                                   : "Sign in to track orders",
                               style: const TextStyle(color: Colors.grey),
                             ),

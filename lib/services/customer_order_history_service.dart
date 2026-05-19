@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:api_selfxo_project/api/dio_client.dart';
+import 'package:api_selfxo_project/services/session_manager.dart';
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -136,40 +137,14 @@ class CustomerOrderHistoryService {
   Future<List<CustomerOrderHistoryItem>> _loadRemoteOrders(
     SharedPreferences prefs,
   ) async {
-    final sanctumToken =
-        prefs.getString("customer_sanctum_token")?.trim() ?? "";
-    if (sanctumToken.isNotEmpty) {
-      try {
-        final dio = DioClient.getDio();
-        final res = await dio.get(
-          "pwa/customer/orders",
-          options: Options(headers: {"Authorization": "Bearer $sanctumToken"}),
-        );
-        final payload = res.data;
-        final rawOrders =
-            payload is Map ? (payload["data"] ?? payload["orders"]) : payload;
-        if (rawOrders is! List) return const [];
-        return rawOrders
-            .whereType<Map>()
-            .map((order) => CustomerOrderHistoryItem.fromJson(
-                  order.map((key, value) => MapEntry("$key", value)),
-                ))
-            .where((order) => order.orderId.isNotEmpty)
-            .toList();
-      } catch (_) {
-        return const [];
-      }
-    }
-
-    final firebaseToken =
-        prefs.getString("customer_firebase_token")?.trim() ?? "";
-    if (firebaseToken.isEmpty) return const [];
+    final sanctumToken = await SessionManager.instance.getSanctumToken();
+    if (sanctumToken == null || sanctumToken.isEmpty) return const [];
 
     try {
       final dio = DioClient.getDio();
       final res = await dio.get(
-        "pwa/customer-orders",
-        options: Options(headers: {"X-Firebase-Id-Token": firebaseToken}),
+        "pwa/customer/orders",
+        options: Options(headers: {"Authorization": "Bearer $sanctumToken"}),
       );
       final payload = res.data;
       final rawOrders =
