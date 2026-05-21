@@ -6,6 +6,7 @@ import 'package:api_selfxo_project/core/device_info.dart';
 import 'package:api_selfxo_project/core/idle_timer.dart';
 import 'package:api_selfxo_project/core/kiosk_memory_service.dart';
 import 'package:api_selfxo_project/screens/block_screen.dart';
+import 'package:api_selfxo_project/screens/order_pickup_confirmation_screen.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:api_selfxo_project/services/customer_order_history_service.dart';
 import 'package:flutter/material.dart';
@@ -372,38 +373,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
       _waitingForPaymentCompletion = false;
     });
 
-    bool alreadyPrinted = false;
-    try {
-      final orderId = _orderId;
-      if (orderId != null) {
-        final details = await KioskApi().getOrderDetails(orderId);
-        alreadyPrinted = _hasPrintedMarker(details.data, 7);
-      }
-    } catch (_) {}
-
     if (!_active || !mounted) return;
     _openedSuccessScreen = true;
     _saveCustomerOrderHistoryInBackground();
-    if (alreadyPrinted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => _WebPrintReadyScreen(
-            orderNumber: _orderId!,
-            restaurantName: _displayRestaurantName,
-            source: 'web_order_already_printed',
-          ),
-        ),
-      );
-      return;
-    }
-
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => _WebScanToPrintScreen(
-          cart: widget.cart,
-          orderNumber: _orderId!,
+        builder: (_) => OrderPickupConfirmationScreen(
+          orderId: _orderId!,
           restaurantName: _displayRestaurantName,
           orderType: widget.orderType,
         ),
@@ -587,8 +564,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
         SnackBar(
           content: Text(
             app == _WebUpiApp.generic
-                ? "Complete payment in your UPI app. After payment, scan to print will open automatically."
-                : "Complete payment in ${app.label}. After payment, scan to print will open automatically.",
+                ? "Complete payment in your UPI app. Your order QR will appear automatically after payment."
+                : "Complete payment in ${app.label}. Your order QR will appear automatically after payment.",
           ),
           behavior: SnackBarBehavior.floating,
         ),
@@ -899,7 +876,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     viewportHeight: MediaQuery.sizeOf(context).height,
                     paymentQrData: _qrData,
                     paymentHint: _waitingForPaymentCompletion
-                        ? "Complete payment in $_selectedPaymentLabel. After payment, the scan-to-print screen will open automatically."
+                        ? "Complete payment in $_selectedPaymentLabel. Your order QR will appear automatically after payment."
                         : "For testing, scan the QR below to pay, or choose any UPI app below.",
                     onGooglePay: () => _handlePayNow(_WebUpiApp.googlePay),
                     onPhonePe: () => _handlePayNow(_WebUpiApp.phonePe),

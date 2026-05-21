@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:api_selfxo_project/core/device_layout.dart';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
-import 'package:api_selfxo_project/screens/pickup_qr_screen.dart';
+import 'package:api_selfxo_project/screens/order_pickup_confirmation_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -490,107 +490,17 @@ class _PaymentScreenState extends State<PaymentScreen>
       _waitingForPaymentCompletion = false;
     });
 
-    bool alreadyPrinted = false;
-    try {
-      final orderId = _orderId;
-      if (orderId != null) {
-        final details = await KioskApi().getOrderDetails(orderId);
-        alreadyPrinted = _hasPrintedMarker(details.data, 7);
-      }
-    } catch (_) {}
-
     if (!_active || !mounted) return;
-    if (alreadyPrinted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => PickupQrScreen(
-            cart: widget.cart,
-            orderId: _orderId!,
-            restaurantName: _displayRestaurantName,
-            orderType: widget.orderType,
-          ),
-        ),
-      );
-      return;
-    }
-
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => PickupQrScreen(
-          cart: widget.cart,
+        builder: (_) => OrderPickupConfirmationScreen(
           orderId: _orderId!,
           restaurantName: _displayRestaurantName,
           orderType: widget.orderType,
         ),
       ),
     );
-  }
-
-  bool _hasPrintedMarker(dynamic value, int depth) {
-    if (value == null || depth <= 0) return false;
-
-    bool looksPrinted(dynamic raw) {
-      if (raw == true) return true;
-      if (raw is num) return raw > 0;
-      final s = raw?.toString().trim().toLowerCase() ?? '';
-      if (s.isEmpty) return false;
-      return s.contains('printed') ||
-          s.contains('print_success') ||
-          s.contains('receipt_printed') ||
-          s.contains('served') ||
-          s.contains('picked') ||
-          s.contains('fulfilled') ||
-          s.contains('completed');
-    }
-
-    if (value is Map) {
-      for (final key in const [
-        'is_printed',
-        'printed',
-        'print_status',
-        'printStatus',
-        'receipt_printed',
-        'receiptPrinted',
-        'printed_at',
-        'printedAt',
-        'print_count',
-        'printCount',
-        'status',
-        'order_status',
-        'orderStatus',
-        'pickup_status',
-        'pickupStatus',
-      ]) {
-        if (value.containsKey(key) && looksPrinted(value[key])) {
-          return true;
-        }
-      }
-      for (final nestedKey in const [
-        'data',
-        'order',
-        'details',
-        'order_details',
-        'orderDetails',
-        'payload',
-        'result',
-      ]) {
-        if (value.containsKey(nestedKey) &&
-            _hasPrintedMarker(value[nestedKey], depth - 1)) {
-          return true;
-        }
-      }
-      for (final entry in value.entries) {
-        if (_hasPrintedMarker(entry.value, depth - 1)) return true;
-      }
-    } else if (value is List) {
-      for (final item in value) {
-        if (_hasPrintedMarker(item, depth - 1)) return true;
-      }
-    }
-
-    return false;
   }
 
   void _handleError(String msg) {

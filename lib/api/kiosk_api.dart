@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:api_selfxo_project/services/auth_service.dart';
 import 'package:api_selfxo_project/services/restaurant_api_service.dart';
+import 'package:api_selfxo_project/services/session_manager.dart';
 import 'dio_client.dart';
 
 class KioskApi {
@@ -383,6 +384,17 @@ class KioskApi {
       final customerBlockName =
           prefs.getString("customer_block_name")?.trim() ?? "";
       final branchId = prefs.getInt("branch_id");
+      int? pwaCustomerId;
+      if (await SessionManager.instance.hasSession()) {
+        final customer = await SessionManager.instance.getCustomer();
+        final rawId = customer?['id'];
+        if (rawId != null) {
+          final parsed = int.tryParse(rawId.toString());
+          if (parsed != null && parsed > 0) {
+            pwaCustomerId = parsed;
+          }
+        }
+      }
       final body = <String, dynamic>{
         "orderType": orderType,
         "orderItemList": orderItems,
@@ -394,12 +406,14 @@ class KioskApi {
         if (customerBlockName.isNotEmpty)
           "customer_block_name": customerBlockName,
         if (branchId != null) "branch_id": branchId,
+        if (pwaCustomerId != null) "pwa_customer_id": pwaCustomerId,
       };
       kioskLog(
         "createOrder orderType=$orderType items=${orderItems.length} "
         "restaurant_id=${restaurantId.isEmpty ? "-" : restaurantId} "
         "device_id=${deviceId.isEmpty ? "-" : deviceId} "
-        "customer_mobile=${customerMobile.isEmpty ? "-" : customerMobile}",
+        "customer_mobile=${customerMobile.isEmpty ? "-" : customerMobile} "
+        "pwa_customer_id=${pwaCustomerId ?? "-"}",
         tag: "ORDER_CREATE",
       );
       return dio.post(
