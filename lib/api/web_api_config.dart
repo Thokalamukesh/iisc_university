@@ -1,5 +1,7 @@
 class WebApiConfig {
-  static const String defaultBaseUrl = "http://127.0.0.1:8000/api/";
+  static const String defaultBaseUrl = "https://gitam.sirixo.com/api/";
+  static const String defaultFlatRestaurantsUrl =
+      "${defaultBaseUrl}all-restaurants";
   static const String defaultRestaurantsUrl =
       "${defaultBaseUrl}pwa/groups-restaurants";
 
@@ -11,5 +13,10 @@ class WebApiConfig {
   static const String allRestaurantsUrl = String.fromEnvironment(
     "SELFX_WEB_RESTAURANTS_URL",
     defaultValue: defaultRestaurantsUrl,
+  );
+
+  static const String flatRestaurantsUrl = String.fromEnvironment(
+    "SELFX_WEB_FLAT_RESTAURANTS_URL",
+    defaultValue: defaultFlatRestaurantsUrl,
   );
 }

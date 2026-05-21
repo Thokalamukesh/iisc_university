@@ -39,9 +39,16 @@ class _CustomerBlock {
 
   factory _CustomerBlock.fromJson(Map<String, dynamic> json, int index) {
     final restaurants = (json['restaurants'] as List?)?.length ?? 0;
+    final rawId =
+        json['group_id'] ?? json['groupId'] ?? json['branch_id'] ?? json['id'];
+    final parsedId = rawId is num ? rawId.toInt() : int.tryParse('$rawId');
     return _CustomerBlock(
-      id: (json['group_id'] as num).toInt(),
-      name: json['group_name']?.toString() ?? 'Block ${index + 1}',
+      id: parsedId ?? index + 1,
+      name: json['group_name']?.toString().trim().isNotEmpty == true
+          ? json['group_name'].toString()
+          : json['name']?.toString().trim().isNotEmpty == true
+              ? json['name'].toString()
+              : 'Block ${index + 1}',
       cafes: restaurants,
       accent: _accentFor(index),
     );
@@ -141,7 +148,7 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
         ),
       );
 
-      final url = WebApiConfig.allRestaurantsUrl;
+      const url = WebApiConfig.allRestaurantsUrl;
       kioskLog('Fetching groups from $url', tag: 'BLOCK_SCREEN');
       final res = await dio.get(url);
 
@@ -154,9 +161,20 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
       if (rawData is List) {
         list = rawData;
       } else if (rawData is String) {
-        list = jsonDecode(rawData) as List<dynamic>;
-      } else if (rawData is Map && rawData.containsKey('data')) {
-        list = rawData['data'] as List<dynamic>;
+        final decoded = jsonDecode(rawData);
+        if (decoded is List) {
+          list = decoded;
+        } else if (decoded is Map) {
+          final rawList =
+              decoded['data'] ?? decoded['groups'] ?? decoded['items'];
+          list = rawList is List ? rawList : const [];
+        } else {
+          list = const [];
+        }
+      } else if (rawData is Map) {
+        final rawList =
+            rawData['data'] ?? rawData['groups'] ?? rawData['items'];
+        list = rawList is List ? rawList : const [];
       } else {
         list = [];
       }
@@ -164,10 +182,15 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
       final blocks = list
           .asMap()
           .entries
-          .map((e) => _CustomerBlock.fromJson(
-                Map<String, dynamic>.from(e.value as Map),
-                e.key,
-              ))
+          .map((e) {
+            final value = e.value;
+            if (value is! Map) return null;
+            return _CustomerBlock.fromJson(
+              Map<String, dynamic>.from(value),
+              e.key,
+            );
+          })
+          .whereType<_CustomerBlock>()
           .toList();
 
       kioskLog('Loaded ${blocks.length} groups', tag: 'BLOCK_SCREEN');
@@ -331,9 +354,10 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
                           runSpacing: 12,
                           children: _blocks.map((block) {
                             return SizedBox(
-                              width:
-                                  (contentWidth - (horizontalPadding * 2) - 12) /
-                                      2,
+                              width: (contentWidth -
+                                      (horizontalPadding * 2) -
+                                      12) /
+                                  2,
                               child: _BlockCard(
                                 block: block,
                                 selected: _selectedBranchId == block.id,

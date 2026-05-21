@@ -52,7 +52,8 @@ class FirebaseAuthService {
     _otpInFlight = true;
 
     try {
-      _log('sendOtp started. raw_length=${mobileNumber.length} host=${Uri.base.host}');
+      _log(
+          'sendOtp started. raw_length=${mobileNumber.length} host=${Uri.base.host}');
       await _ensureFirebaseReady();
       _ensureRecaptchaContainer();
 
@@ -117,7 +118,8 @@ class FirebaseAuthService {
       credential = await confirmationResult.confirm(digits).timeout(
             _firebaseTimeout,
           );
-      _log('Firebase OTP confirm completed. user_present=${credential.user != null}');
+      _log(
+          'Firebase OTP confirm completed. user_present=${credential.user != null}');
     } on FirebaseAuthException catch (e) {
       _logFirebaseException('verifyOtp', e);
       throw Exception(_firebaseAuthMessage(e));
@@ -255,7 +257,7 @@ class FirebaseAuthService {
       case 'captcha-check-failed':
         return 'reCAPTCHA failed. Please refresh and try again.';
       case 'invalid-app-credential':
-        return 'Firebase rejected the reCAPTCHA verifier. Ensure 127.0.0.1 is in Firebase Authorized domains and you are accessing the app via http://127.0.0.1:5000.';
+        return 'Firebase rejected the reCAPTCHA verifier. Ensure gitam.sirixo.com is in Firebase Authorized domains and you are accessing the app via https://gitam.sirixo.com/.';
       case 'operation-not-allowed':
         return 'Phone sign-in is not enabled for this Firebase project.';
       case 'unauthorized-domain':

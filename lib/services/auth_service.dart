@@ -93,7 +93,7 @@ class AuthService {
     );
     final endpoints = <String>[
       WebApiConfig.allRestaurantsUrl,
-      "http://127.0.0.1:8000/api/all-restaurants",
+      WebApiConfig.flatRestaurantsUrl,
     ];
     for (final endpoint in endpoints) {
       final uri = Uri.tryParse(endpoint);

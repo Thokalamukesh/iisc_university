@@ -121,7 +121,8 @@ The web API URL is now configurable at build time.
 Defaults:
 
 - `SELFX_WEB_API_BASE_URL=https://gitam.sirixo.com/api/`
-- `SELFX_WEB_RESTAURANTS_URL=https://gitam.sirixo.com/api/all-restaurants`
+- `SELFX_WEB_RESTAURANTS_URL=https://gitam.sirixo.com/api/pwa/groups-restaurants`
+- `SELFX_WEB_FLAT_RESTAURANTS_URL=https://gitam.sirixo.com/api/all-restaurants`
 
 If you keep using the current backend, you do not need to set anything.
 
@@ -131,7 +132,8 @@ If you later move the API behind an AWS domain, deploy like this:
 export AWS_S3_BUCKET=your-site-bucket
 export CLOUDFRONT_DISTRIBUTION_ID=E1234567890ABC
 export SELFX_WEB_API_BASE_URL=https://api.yourdomain.com/api/
-export SELFX_WEB_RESTAURANTS_URL=https://api.yourdomain.com/api/all-restaurants
+export SELFX_WEB_RESTAURANTS_URL=https://api.yourdomain.com/api/pwa/groups-restaurants
+export SELFX_WEB_FLAT_RESTAURANTS_URL=https://api.yourdomain.com/api/all-restaurants
 ./scripts/deploy_aws_web.sh
 ```
 

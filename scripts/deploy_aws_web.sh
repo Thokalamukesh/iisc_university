@@ -77,6 +77,12 @@ if [[ -n "${SELFX_WEB_RESTAURANTS_URL:-}" ]]; then
   )
 fi
 
+if [[ -n "${SELFX_WEB_FLAT_RESTAURANTS_URL:-}" ]]; then
+  BUILD_ARGS+=(
+    "--dart-define=SELFX_WEB_FLAT_RESTAURANTS_URL=${SELFX_WEB_FLAT_RESTAURANTS_URL}"
+  )
+fi
+
 BUILD_STAMP="${SELFX_BUILD_STAMP:-$(date -u +%Y%m%d%H%M%S)}"
 BUILD_ARGS+=("--dart-define=SELFX_BUILD_STAMP=${BUILD_STAMP}")
 

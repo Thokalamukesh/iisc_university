@@ -267,7 +267,7 @@ class OrderUtils {
               validateStatus: (status) => status != null && status < 500,
             ),
           );
-          final res = await dio.get(WebApiConfig.allRestaurantsUrl);
+          final res = await dio.get(WebApiConfig.flatRestaurantsUrl);
           final data = res.data;
           final rawList = data is List
               ? data
