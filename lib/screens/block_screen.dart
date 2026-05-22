@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:ui' show ImageFilter;
 
 import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:api_selfxo_project/core/fast_page_route.dart';
@@ -8,7 +9,9 @@ import 'package:api_selfxo_project/screens/customer_nav/customer_account_screen.
 import 'package:api_selfxo_project/screens/customer_nav/customer_offers_screen.dart';
 import 'package:api_selfxo_project/screens/customer_nav/customer_orders_screen.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ─── Accent palette cycling for dynamically-fetched groups ───────────────────
@@ -57,7 +60,12 @@ class _CustomerBlock {
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 class CustomerBlockScreen extends StatefulWidget {
-  const CustomerBlockScreen({super.key});
+  final int initialTab;
+
+  const CustomerBlockScreen({
+    super.key,
+    this.initialTab = 0,
+  });
 
   /// Called by the session gate to pre-populate the block cache
   /// so the blocks screen renders without any spinner on first visit.
@@ -90,7 +98,8 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
   static const Color _brandDarkColor = Color(0xFFD32F2F);
   static const Color _textColor = Color(0xFF111827);
   static const Color _mutedTextColor = Color(0xFF737783);
-  static const Color _surfaceColor = Color(0xFFF7F8FB);
+  static const Color _surfaceColor = Color(0xFFF4F6FA);
+  static const String _diskCacheKey = 'customer_block_groups_cache_v1';
 
   // ── In-memory cache so revisiting the screen is instant ──────────────────
   static List<_CustomerBlock>? _cachedBlocks;
@@ -102,13 +111,24 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
   String? _error;
 
   int? _selectedBranchId;
-  int _selectedBottomIndex = 0;
+  late int _selectedBottomIndex;
   bool _saving = false;
 
   @override
   void initState() {
     super.initState();
+    _selectedBottomIndex = widget.initialTab.clamp(0, 3).toInt();
     _loadBlocksFromApi();
+  }
+
+  @override
+  void didUpdateWidget(covariant CustomerBlockScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialTab != widget.initialTab) {
+      setState(() {
+        _selectedBottomIndex = widget.initialTab.clamp(0, 3).toInt();
+      });
+    }
   }
 
   Future<void> _loadBlocksFromApi() async {
@@ -118,16 +138,10 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
     if (cached != null &&
         cachedAt != null &&
         DateTime.now().difference(cachedAt) < _cacheTtl) {
-      final prefs = await SharedPreferences.getInstance();
-      final savedBranchId = prefs.getInt('branch_id');
-      final validSaved =
-          savedBranchId != null && cached.any((b) => b.id == savedBranchId)
-              ? savedBranchId
-              : null;
       if (!mounted) return;
       setState(() {
         _blocks = cached;
-        _selectedBranchId = validSaved;
+        _selectedBranchId = null;
         _loading = false;
       });
       return;
@@ -138,7 +152,21 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
       _error = null;
     });
 
+    var showingCachedBlocks = false;
+
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final diskBlocks = _readBlocksFromDiskCache(prefs);
+      if (diskBlocks.isNotEmpty && mounted) {
+        showingCachedBlocks = true;
+        setState(() {
+          _blocks = diskBlocks;
+          _selectedBranchId = null;
+          _loading = false;
+          _error = null;
+        });
+      }
+
       final dio = Dio(
         BaseOptions(
           connectTimeout: const Duration(seconds: 10),
@@ -195,17 +223,15 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
 
       kioskLog('Loaded ${blocks.length} groups', tag: 'BLOCK_SCREEN');
 
-      // Restore previously saved branch if still valid
-      final prefs = await SharedPreferences.getInstance();
+      // Clear stale saved branch data, but do not pre-select a block visually.
       final savedBranchId = prefs.getInt('branch_id');
-      final validSaved =
-          savedBranchId != null && blocks.any((b) => b.id == savedBranchId)
-              ? savedBranchId
-              : null;
-      if (savedBranchId != null && validSaved == null) {
+      final savedStillExists =
+          savedBranchId != null && blocks.any((b) => b.id == savedBranchId);
+      if (savedBranchId != null && !savedStillExists) {
         await prefs.remove('branch_id');
         await prefs.remove('customer_block_name');
       }
+      await _writeBlocksToDiskCache(prefs, list);
 
       if (!mounted) return;
       // \u2500\u2500 Write to static cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -213,18 +239,59 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
       _cacheTime = DateTime.now();
       setState(() {
         _blocks = blocks;
-        _selectedBranchId = validSaved;
+        _selectedBranchId = null;
         _loading = false;
       });
     } catch (e, st) {
       kioskLogError('Failed to load groups: $e',
           tag: 'BLOCK_SCREEN', error: e, stackTrace: st);
       if (!mounted) return;
+      if (showingCachedBlocks) return;
       setState(() {
         _loading = false;
         _error = 'Unable to load blocks. Please check your connection.';
       });
     }
+  }
+
+  List<_CustomerBlock> _readBlocksFromDiskCache(SharedPreferences prefs) {
+    try {
+      final raw = prefs.getString(_diskCacheKey);
+      if (raw == null || raw.trim().isEmpty) return const [];
+      final decoded = jsonDecode(raw);
+      final rawList = decoded is Map ? decoded['groups'] : decoded;
+      if (rawList is! List) return const [];
+      return rawList
+          .asMap()
+          .entries
+          .map((entry) {
+            final value = entry.value;
+            if (value is! Map) return null;
+            return _CustomerBlock.fromJson(
+              Map<String, dynamic>.from(value),
+              entry.key,
+            );
+          })
+          .whereType<_CustomerBlock>()
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> _writeBlocksToDiskCache(
+    SharedPreferences prefs,
+    List<dynamic> groups,
+  ) async {
+    try {
+      await prefs.setString(
+        _diskCacheKey,
+        jsonEncode({
+          'cached_at': DateTime.now().millisecondsSinceEpoch,
+          'groups': groups,
+        }),
+      );
+    } catch (_) {}
   }
 
   Future<void> _selectBlock(_CustomerBlock block) async {
@@ -246,30 +313,64 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isHomeTab = _selectedBottomIndex == 0;
+
     return Scaffold(
+      extendBodyBehindAppBar: isHomeTab,
       backgroundColor: _surfaceColor,
       body: SafeArea(
+        top: !isHomeTab,
         bottom: false,
         child: _buildSelectedTab(),
       ),
       bottomNavigationBar: BottomNavigationBar(
+        backgroundColor: Colors.white,
+        elevation: 14,
         selectedItemColor: _brandDarkColor,
-        unselectedItemColor: Colors.grey,
+        unselectedItemColor: const Color(0xFF8A90A0),
+        selectedLabelStyle: const TextStyle(fontWeight: FontWeight.w800),
+        unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w700),
         showUnselectedLabels: true,
         type: BottomNavigationBarType.fixed,
         currentIndex: _selectedBottomIndex,
-        onTap: (index) => setState(() => _selectedBottomIndex = index),
+        onTap: _handleBottomNavigationTap,
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: 'Home'),
           BottomNavigationBarItem(
-              icon: Icon(Icons.assignment_outlined), label: 'Orders'),
+            icon: Icon(Icons.home_filled),
+            label: 'Home',
+          ),
           BottomNavigationBarItem(
-              icon: Icon(Icons.local_offer_outlined), label: 'Offers'),
+            icon: Icon(Icons.assignment_outlined),
+            label: 'Orders',
+          ),
           BottomNavigationBarItem(
-              icon: Icon(Icons.person_outline), label: 'Account'),
+            icon: Icon(Icons.local_offer_outlined),
+            label: 'Offers',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.person_outline),
+            label: 'Account',
+          ),
         ],
       ),
     );
+  }
+
+  void _handleBottomNavigationTap(int index) {
+    if (kIsWeb) {
+      final target = switch (index) {
+        0 => '/home',
+        1 => '/orders',
+        2 => '/offers',
+        3 => '/profile',
+        _ => '/home',
+      };
+      final current = GoRouterState.of(context).uri.path;
+      if (current == target) return;
+      context.go(target);
+      return;
+    }
+    setState(() => _selectedBottomIndex = index);
   }
 
   Widget _buildSelectedTab() {
@@ -292,93 +393,106 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
         final isWide = constraints.maxWidth >= 720;
         final horizontalPadding = isWide ? 24.0 : 16.0;
         final contentWidth =
-            constraints.maxWidth > 680 ? 680.0 : constraints.maxWidth;
+            constraints.maxWidth > 760 ? 760.0 : constraints.maxWidth;
 
         return Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 680),
+            constraints: const BoxConstraints(maxWidth: 760),
             child: Column(
               children: [
                 Expanded(
                   child: ListView(
                     physics: const BouncingScrollPhysics(),
-                    padding: EdgeInsets.fromLTRB(
-                      horizontalPadding,
-                      0,
-                      horizontalPadding,
-                      18,
-                    ),
+                    padding: const EdgeInsets.only(bottom: 22),
                     children: [
-                      _HeroHeader(onBack: _handleBack),
-                      const SizedBox(height: 10),
-                      const _CampusCard(),
-                      const SizedBox(height: 14),
-                      const Text(
-                        'Available Blocks',
-                        style: TextStyle(
-                          color: _textColor,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w900,
+                      _BlockTopBar(
+                        loading: _loading,
+                      ),
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontalPadding,
+                          20,
+                          horizontalPadding,
+                          0,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    'Available Blocks',
+                                    style: TextStyle(
+                                      color: _textColor,
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            if (_loading)
+                              const Center(
+                                child: Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 40),
+                                  child: CircularProgressIndicator(),
+                                ),
+                              )
+                            else if (_error != null)
+                              _ErrorState(
+                                message: _error!,
+                                onRetry: _loadBlocksFromApi,
+                              )
+                            else if (_blocks.isEmpty)
+                              const Center(
+                                child: Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 40),
+                                  child: Text(
+                                    'No blocks available at the moment.',
+                                    style: TextStyle(
+                                      color: _mutedTextColor,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            else if (isWide)
+                              Wrap(
+                                spacing: 12,
+                                runSpacing: 12,
+                                children: _blocks.map((block) {
+                                  return SizedBox(
+                                    width: (contentWidth -
+                                            (horizontalPadding * 2) -
+                                            12) /
+                                        2,
+                                    child: _BlockCard(
+                                      block: block,
+                                      selected: _selectedBranchId == block.id,
+                                      disabled: _saving,
+                                      onTap: () => _selectBlock(block),
+                                    ),
+                                  );
+                                }).toList(),
+                              )
+                            else
+                              ..._blocks.map((block) {
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: _BlockCard(
+                                    block: block,
+                                    selected: _selectedBranchId == block.id,
+                                    disabled: _saving,
+                                    onTap: () => _selectBlock(block),
+                                  ),
+                                );
+                              }),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 10),
-                      if (_loading)
-                        const Center(
-                          child: Padding(
-                            padding: EdgeInsets.symmetric(vertical: 40),
-                            child: CircularProgressIndicator(),
-                          ),
-                        )
-                      else if (_error != null)
-                        _ErrorState(
-                          message: _error!,
-                          onRetry: _loadBlocksFromApi,
-                        )
-                      else if (_blocks.isEmpty)
-                        const Center(
-                          child: Padding(
-                            padding: EdgeInsets.symmetric(vertical: 40),
-                            child: Text(
-                              'No blocks available at the moment.',
-                              style: TextStyle(
-                                color: _mutedTextColor,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        )
-                      else if (isWide)
-                        Wrap(
-                          spacing: 12,
-                          runSpacing: 12,
-                          children: _blocks.map((block) {
-                            return SizedBox(
-                              width: (contentWidth -
-                                      (horizontalPadding * 2) -
-                                      12) /
-                                  2,
-                              child: _BlockCard(
-                                block: block,
-                                selected: _selectedBranchId == block.id,
-                                disabled: _saving,
-                                onTap: () => _selectBlock(block),
-                              ),
-                            );
-                          }).toList(),
-                        )
-                      else
-                        ..._blocks.map((block) {
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: _BlockCard(
-                              block: block,
-                              selected: _selectedBranchId == block.id,
-                              disabled: _saving,
-                              onTap: () => _selectBlock(block),
-                            ),
-                          );
-                        }),
                     ],
                   ),
                 ),
@@ -388,11 +502,6 @@ class _CustomerBlockScreenState extends State<CustomerBlockScreen> {
         );
       },
     );
-  }
-
-  void _handleBack() {
-    final navigator = Navigator.of(context);
-    if (navigator.canPop()) navigator.pop();
   }
 }
 
@@ -444,291 +553,167 @@ class _ErrorState extends StatelessWidget {
   }
 }
 
-// ─── Hero header ──────────────────────────────────────────────────────────────
-class _HeroHeader extends StatelessWidget {
-  final VoidCallback onBack;
+// ─── Header ──────────────────────────────────────────────────────────────────
+class _BlockTopBar extends StatelessWidget {
+  final bool loading;
 
-  const _HeroHeader({required this.onBack});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(18, 12, 18, 18),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFFFFD4BF),
-            Color(0xFFFFE9C7),
-            Color(0xFFEAD8FF),
-          ],
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Expanded(
-            flex: 10,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _BackButton(onTap: onBack),
-                const SizedBox(height: 10),
-                const Text(
-                  'Select Your\nCanteen Block',
-                  style: TextStyle(
-                    color: _CustomerBlockScreenState._textColor,
-                    fontSize: 25,
-                    height: 1.04,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Pick your block to view available restaurants and services.',
-                  style: TextStyle(
-                    color: Color(0xFF5F6470),
-                    fontSize: 13,
-                    height: 1.32,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          const Expanded(
-            flex: 8,
-            child: SizedBox(
-              height: 128,
-              child: _CampusIllustration(),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BackButton extends StatelessWidget {
-  final VoidCallback onTap;
-
-  const _BackButton({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(14),
-      elevation: 0,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
-        child: const SizedBox(
-          width: 44,
-          height: 40,
-          child: Icon(
-            Icons.arrow_back_rounded,
-            color: _CustomerBlockScreenState._textColor,
-            size: 24,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CampusIllustration extends StatelessWidget {
-  const _CampusIllustration();
-
-  @override
-  Widget build(BuildContext context) {
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        Positioned(
-          right: 0,
-          top: 4,
-          child: Container(
-            width: 112,
-            height: 112,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white.withOpacity(0.82),
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF8B4A32).withOpacity(0.18),
-                  blurRadius: 22,
-                  offset: const Offset(0, 10),
-                ),
-              ],
-            ),
-            padding: const EdgeInsets.all(5),
-            child: ClipOval(
-              child: Image.asset(
-                _CustomerBlockScreenState._campusImageAsset,
-                fit: BoxFit.cover,
-                alignment: Alignment.center,
-                errorBuilder: (_, __, ___) => const Icon(
-                  Icons.school_rounded,
-                  size: 48,
-                  color: Color(0xFFFF365A),
-                ),
-              ),
-            ),
-          ),
-        ),
-        Positioned(
-          right: 72,
-          bottom: 10,
-          child: Container(
-            width: 54,
-            height: 54,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white,
-              border: Border.all(color: const Color(0xFFFFD5DF), width: 3),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.12),
-                  blurRadius: 14,
-                  offset: const Offset(0, 6),
-                ),
-              ],
-            ),
-            child: const Icon(
-              Icons.location_on_rounded,
-              color: _CustomerBlockScreenState._brandColor,
-              size: 28,
-            ),
-          ),
-        ),
-        Positioned(
-          right: 8,
-          bottom: 0,
-          child: Container(
-            width: 82,
-            height: 22,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(99),
-              color: Colors.white.withOpacity(0.86),
-              border: Border.all(color: Colors.white.withOpacity(0.92)),
-            ),
-            alignment: Alignment.center,
-            child: const Text(
-              'IISC Campus',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Color(0xFF9F342C),
-                fontSize: 9,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ),
-        ),
-        Positioned(
-          right: -4,
-          top: 0,
-          child: Container(
-            width: 30,
-            height: 30,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: const Color(0xFFFFF2D7).withOpacity(0.88),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _CampusCard extends StatelessWidget {
-  const _CampusCard();
+  const _BlockTopBar({
+    required this.loading,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      height: 318,
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: const BorderRadius.only(
+          bottomLeft: Radius.circular(30),
+          bottomRight: Radius.circular(30),
+        ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(.07),
-            blurRadius: 24,
-            offset: const Offset(0, 10),
+            color: Colors.black.withOpacity(.16),
+            blurRadius: 34,
+            offset: const Offset(0, 18),
           ),
         ],
       ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white,
-              border: Border.all(
-                color: const Color(0xFFFFD5DF),
-                width: 3,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.10),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(2),
-              child: ClipOval(
-                child: Image.asset(
-                  _CustomerBlockScreenState._campusImageAsset,
-                  fit: BoxFit.cover,
-                  alignment: Alignment.center,
-                  errorBuilder: (_, __, ___) => const Icon(
-                    Icons.school_rounded,
-                    size: 28,
-                    color: Color(0xFFFF365A),
-                  ),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.only(
+          bottomLeft: Radius.circular(30),
+          bottomRight: Radius.circular(30),
+        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.asset(
+              _CustomerBlockScreenState._campusImageAsset,
+              fit: BoxFit.cover,
+              alignment: Alignment.center,
+              errorBuilder: (_, __, ___) => Container(
+                color: const Color(0xFF111827),
+                child: const Icon(
+                  Icons.school_rounded,
+                  color: Colors.white,
+                  size: 46,
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Current Campus',
-                  style: TextStyle(
-                    color: _CustomerBlockScreenState._mutedTextColor,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withOpacity(.08),
+                    Colors.black.withOpacity(.28),
+                    Colors.black.withOpacity(.74),
+                  ],
+                  stops: const [.0, .48, 1],
                 ),
-                SizedBox(height: 2),
-                Text(
-                  'Indian Institute of Science (IISC)',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: _CustomerBlockScreenState._textColor,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-        ],
+            const Positioned(
+              left: 20,
+              right: 20,
+              bottom: 104,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Select your canteen',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 34,
+                      height: 1.03,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Choose a campus block to view available restaurants.',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Color(0xFFECEFF4),
+                      fontSize: 14,
+                      height: 1.34,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 18,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(.18),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: Colors.white.withOpacity(.28)),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(.22),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: const Icon(
+                            Icons.location_on_outlined,
+                            color: Colors.white,
+                            size: 21,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text(
+                                'IISC Campus',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: Color(0xFFECEFF4),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                loading ? 'Loading canteens' : 'Campus dining',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -750,88 +735,125 @@ class _BlockCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final restaurantLabel =
+        '${block.cafes} ${block.cafes == 1 ? 'restaurant' : 'restaurants'}';
+
     return Material(
-      color: Colors.white,
+      color: Colors.transparent,
       borderRadius: BorderRadius.circular(18),
       child: InkWell(
         onTap: disabled ? null : onTap,
         borderRadius: BorderRadius.circular(18),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.all(10),
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeInOut,
+          padding: const EdgeInsets.fromLTRB(14, 14, 12, 14),
           decoration: BoxDecoration(
+            color: Colors.white,
             borderRadius: BorderRadius.circular(18),
             border: Border.all(
               color: selected
                   ? _CustomerBlockScreenState._brandColor
-                  : const Color(0xFFE8EAF0),
-              width: selected ? 1.6 : 1,
+                  : const Color(0xFFE6EAF1),
+              width: selected ? 1.8 : 1,
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(.055),
-                blurRadius: 18,
+                color: Colors.black.withOpacity(.035),
+                blurRadius: 16,
                 offset: const Offset(0, 8),
               ),
             ],
           ),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _BlockThumbnail(accent: block.accent),
-              const SizedBox(width: 12),
+              Container(
+                width: 54,
+                height: 54,
+                decoration: BoxDecoration(
+                  color: block.accent.withOpacity(.10),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Icon(
+                  Icons.apartment_rounded,
+                  color: block.accent,
+                  size: 28,
+                ),
+              ),
+              const SizedBox(width: 13),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    Text(
+                      block.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _CustomerBlockScreenState._textColor,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
                       children: [
-                        Expanded(
-                          child: Text(
-                            block.name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: _CustomerBlockScreenState._textColor,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
+                        _BlockBadge(
+                          icon: Icons.restaurant_menu_rounded,
+                          label: restaurantLabel,
+                          tone: block.accent,
                         ),
-                        const SizedBox(width: 8),
-                        Icon(
-                          selected
-                              ? Icons.check_circle_rounded
-                              : Icons.radio_button_unchecked_rounded,
-                          color: selected
-                              ? _CustomerBlockScreenState._brandColor
-                              : const Color(0xFFC8CBD4),
-                          size: 26,
+                        const _BlockBadge(
+                          icon: Icons.check_circle_outline_rounded,
+                          label: 'Open',
+                          tone: Color(0xFF168253),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
+                    const SizedBox(height: 8),
+                    const Row(
                       children: [
-                        _BlockStat(
-                          icon: Icons.restaurant_rounded,
-                          value: '${block.cafes}',
-                          label: block.cafes == 1 ? 'Cafe' : 'Cafes',
+                        Icon(
+                          Icons.near_me_rounded,
+                          color: Color(0xFF8A90A0),
+                          size: 15,
                         ),
-                        const _BlockStat(
-                          icon: Icons.bolt_rounded,
-                          value: '',
-                          label: 'Fast Service',
+                        SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            'Inside campus',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Color(0xFF7B8190),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
                       ],
                     ),
                   ],
                 ),
               ),
+              const SizedBox(width: 10),
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? _CustomerBlockScreenState._brandColor
+                      : block.accent.withOpacity(.10),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  selected ? Icons.check_rounded : Icons.arrow_forward_rounded,
+                  color: selected ? Colors.white : block.accent,
+                  size: 21,
+                ),
+              ),
             ],
           ),
         ),
@@ -840,162 +862,40 @@ class _BlockCard extends StatelessWidget {
   }
 }
 
-class _BlockThumbnail extends StatelessWidget {
-  final Color accent;
-
-  const _BlockThumbnail({required this.accent});
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(14),
-      child: SizedBox(
-        width: 88,
-        height: 78,
-        child: DecoratedBox(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Color(0xFFDDF5FF), Color(0xFFF4FBF8)],
-            ),
-          ),
-          child: CustomPaint(
-            painter: _BlockThumbnailPainter(accent),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _BlockStat extends StatelessWidget {
+class _BlockBadge extends StatelessWidget {
   final IconData icon;
-  final String value;
   final String label;
+  final Color tone;
 
-  const _BlockStat({
+  const _BlockBadge({
     required this.icon,
-    required this.value,
     required this.label,
+    required this.tone,
   });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: 82,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: tone.withOpacity(.09),
+        borderRadius: BorderRadius.circular(999),
+      ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 17, color: const Color(0xFF6E7280)),
+          Icon(icon, color: tone, size: 14),
           const SizedBox(width: 5),
-          Flexible(
-            child: RichText(
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              text: TextSpan(
-                style: const TextStyle(
-                  color: Color(0xFF6E7280),
-                  fontSize: 11,
-                  height: 1.08,
-                  fontWeight: FontWeight.w800,
-                ),
-                children: [
-                  if (value.isNotEmpty)
-                    TextSpan(
-                      text: '$value\n',
-                      style: const TextStyle(
-                        color: _CustomerBlockScreenState._textColor,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  TextSpan(text: label),
-                ],
-              ),
+          Text(
+            label,
+            style: TextStyle(
+              color: Color.lerp(tone, Colors.black, .18),
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
             ),
           ),
         ],
       ),
     );
   }
-}
-
-class _BlockThumbnailPainter extends CustomPainter {
-  final Color accent;
-
-  const _BlockThumbnailPainter(this.accent);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final shadowPaint = Paint()..color = Colors.black.withOpacity(.12);
-    final bodyPaint = Paint()..color = accent;
-    final sidePaint = Paint()..color = Color.lerp(accent, Colors.black, .18)!;
-    final windowPaint = Paint()..color = Colors.white.withOpacity(.56);
-    final treePaint = Paint()..color = const Color(0xFF48A868);
-    final trunkPaint = Paint()..color = const Color(0xFF8A5D3B);
-
-    canvas.drawOval(
-      Rect.fromLTWH(size.width * .10, size.height * .78, size.width * .80, 13),
-      shadowPaint,
-    );
-
-    final front = Path()
-      ..moveTo(size.width * .23, size.height * .22)
-      ..lineTo(size.width * .69, size.height * .12)
-      ..lineTo(size.width * .69, size.height * .76)
-      ..lineTo(size.width * .23, size.height * .84)
-      ..close();
-    final side = Path()
-      ..moveTo(size.width * .69, size.height * .12)
-      ..lineTo(size.width * .85, size.height * .24)
-      ..lineTo(size.width * .85, size.height * .82)
-      ..lineTo(size.width * .69, size.height * .76)
-      ..close();
-
-    canvas.drawPath(front, bodyPaint);
-    canvas.drawPath(side, sidePaint);
-
-    for (var row = 0; row < 4; row++) {
-      for (var col = 0; col < 3; col++) {
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(
-            Rect.fromLTWH(
-              size.width * (.30 + col * .12),
-              size.height * (.31 + row * .12),
-              size.width * .07,
-              size.height * .055,
-            ),
-            const Radius.circular(1.5),
-          ),
-          windowPaint,
-        );
-      }
-    }
-
-    for (var row = 0; row < 4; row++) {
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(
-            size.width * .74,
-            size.height * (.31 + row * .12),
-            size.width * .06,
-            size.height * .05,
-          ),
-          const Radius.circular(1.5),
-        ),
-        windowPaint,
-      );
-    }
-
-    for (final dx in [.18, .88]) {
-      final x = size.width * dx;
-      final y = size.height * .80;
-      canvas.drawRect(Rect.fromLTWH(x - 1.5, y - 16, 3, 17), trunkPaint);
-      canvas.drawCircle(Offset(x, y - 19), 8, treePaint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _BlockThumbnailPainter oldDelegate) =>
-      oldDelegate.accent != accent;
 }

@@ -4,8 +4,9 @@ import 'package:api_selfxo_project/api/kiosk_api.dart';
 import 'package:api_selfxo_project/core/receipt_print_mode.dart';
 import 'package:api_selfxo_project/core/kiosk_log.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
-import 'package:api_selfxo_project/screens/register_screen.dart';
+import 'package:api_selfxo_project/screens/register_screen_io.dart';
 import 'package:api_selfxo_project/services/auth_service.dart';
+import 'package:api_selfxo_project/services/session_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -82,6 +83,10 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
     return null;
   }
 
+  bool _shouldResolveViaRestaurantList(String raw) {
+    return raw.trim().contains(RegExp(r'\s'));
+  }
+
   String _extractErrorMessage(Object error) {
     final raw = error.toString().replaceFirst("Exception: ", "").trim();
     if (raw.isEmpty) {
@@ -108,6 +113,12 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
 
     try {
       final prefs = await SharedPreferences.getInstance();
+      final hasCustomerSession = await SessionManager.instance.hasSession();
+      final hasGuestSession = await SessionManager.instance.isGuestSession();
+      if (!hasCustomerSession && !hasGuestSession) {
+        await SessionManager.instance.continueAsGuest();
+      }
+
       final previousRestaurantId =
           prefs.getString("restaurant_id")?.trim() ?? "";
       final previousRestaurantHash =
@@ -126,7 +137,7 @@ class _WebQrMenuEntryScreenState extends State<WebQrMenuEntryScreen> {
             selectedId ?? selectedHash ?? resolvedRestaurantId;
         resolvedRestaurantHash = selectedHash;
         resolvedRestaurantName = selectedName;
-      } else {
+      } else if (_shouldResolveViaRestaurantList(resolvedRestaurantId)) {
         try {
           final restaurants = await KioskApi().getAllRestaurantsWeb();
           final matched = _resolveRestaurantIdentityFromList(

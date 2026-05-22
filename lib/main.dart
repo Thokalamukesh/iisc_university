@@ -6,14 +6,17 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:api_selfxo_project/api/kiosk_api.dart';
-import 'package:api_selfxo_project/api/web_api_config.dart';
 import 'package:api_selfxo_project/core/kiosk_bootstrap.dart';
 import 'package:api_selfxo_project/firebase_options.dart';
 import 'package:api_selfxo_project/printer/register_kiosk.dart';
+import 'package:api_selfxo_project/router/app_router.dart';
+import 'package:api_selfxo_project/router/auth_service.dart' as web_auth;
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/screens/block_screen.dart';
 import 'package:api_selfxo_project/screens/login_screen.dart';
+import 'package:api_selfxo_project/screens/web_qr_menu_entry.dart';
 import 'package:api_selfxo_project/screens/payment_success.dart';
 import 'package:api_selfxo_project/services/pwa_auth_service.dart';
 import 'package:api_selfxo_project/services/session_manager.dart';
@@ -197,7 +200,75 @@ Future<void> main() async {
 }
 
 Widget _resolveInitialWebHome() {
+  final request = _webLaunchRequest(Uri.base);
+  final restaurantId = request.restaurantId;
+  if (restaurantId != null && restaurantId.trim().isNotEmpty) {
+    return WebQrMenuEntryScreen(
+      restaurantId: restaurantId,
+      requestedOrderType: request.orderType,
+    );
+  }
   return const _WebSessionGate();
+}
+
+({String? restaurantId, String? orderType}) _webLaunchRequest(Uri uri) {
+  String? firstNonEmpty(Map<String, String> params, List<String> keys) {
+    for (final key in keys) {
+      final value = params[key]?.trim();
+      if (value != null && value.isNotEmpty) return value;
+    }
+    return null;
+  }
+
+  String? fromPath(List<String> rawSegments) {
+    final segments = rawSegments
+        .map((segment) => segment.trim())
+        .where((segment) => segment.isNotEmpty)
+        .toList();
+    for (var i = 0; i < segments.length - 1; i++) {
+      final current = segments[i].toLowerCase();
+      if (current == "restaurant" ||
+          current == "restaurants" ||
+          current == "restaurants-home" ||
+          current == "menu" ||
+          current == "kiosk") {
+        return segments[i + 1];
+      }
+    }
+    return null;
+  }
+
+  const restaurantKeys = <String>[
+    "restaurant_id",
+    "restaurantId",
+    "rid",
+    "restaurant",
+    "slug",
+  ];
+  const orderTypeKeys = <String>[
+    "order_type",
+    "orderType",
+    "type",
+  ];
+
+  String? restaurantId = firstNonEmpty(uri.queryParameters, restaurantKeys);
+  String? orderType = firstNonEmpty(uri.queryParameters, orderTypeKeys);
+  restaurantId ??= fromPath(uri.pathSegments);
+
+  final fragment = uri.fragment.trim();
+  if (fragment.isNotEmpty) {
+    final normalizedFragment =
+        fragment.startsWith("/") ? fragment : "/$fragment";
+    final fragmentUri = Uri.tryParse(normalizedFragment);
+    if (fragmentUri != null) {
+      restaurantId ??=
+          firstNonEmpty(fragmentUri.queryParameters, restaurantKeys);
+      orderType ??= firstNonEmpty(fragmentUri.queryParameters, orderTypeKeys);
+      restaurantId ??= fromPath(fragmentUri.pathSegments);
+    }
+  }
+
+  return (restaurantId: restaurantId, orderType: orderType);
 }
 
 class WebCustomerApp extends StatefulWidget {
@@ -208,9 +279,18 @@ class WebCustomerApp extends StatefulWidget {
 }
 
 class _WebCustomerAppState extends State<WebCustomerApp> {
+  late final web_auth.WebAuthService _authService;
+  late final GoRouter _router;
+
   @override
   void initState() {
     super.initState();
+    _authService = web_auth.WebAuthService.instance;
+    _router = AppRouter.createRouter(
+      authService: _authService,
+      navigatorKey: rootNavigatorKey,
+    );
+    unawaited(_authService.initialize());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       sendUiReady();
     });
@@ -218,12 +298,18 @@ class _WebCustomerAppState extends State<WebCustomerApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: rootNavigatorKey,
+    return MaterialApp.router(
       scaffoldMessengerKey: rootScaffoldMessengerKey,
-      navigatorObservers: [appRouteObserver],
       debugShowCheckedModeBanner: false,
-      home: _resolveInitialWebHome(),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFD32F2F),
+          brightness: Brightness.light,
+        ),
+        fontFamily: 'Roboto',
+      ),
+      routerConfig: _router,
     );
   }
 }
@@ -259,30 +345,60 @@ class _WebSessionGateState extends State<_WebSessionGate> {
     try {
       final hasToken = await SessionManager.instance.hasSession();
       if (!hasToken) {
+        final isGuest = await SessionManager.instance.isGuestSession();
+        if (isGuest) {
+          debugPrint('[SESSION_GATE] Guest session found → dashboard');
+          if (mounted) {
+            setState(() {
+              _checking = false;
+              _sessionValid = true;
+            });
+          }
+          return;
+        }
         debugPrint('[SESSION_GATE] No stored token → login screen');
-        if (mounted) setState(() { _checking = false; _sessionValid = false; });
+        if (mounted) {
+          setState(() {
+            _checking = false;
+            _sessionValid = false;
+          });
+        }
         return;
       }
 
       debugPrint('[SESSION_GATE] Token found → validating with backend...');
       final customer = await PwaAuthService.instance.restoreSession();
       timer.stop();
-      debugPrint('[SESSION_GATE] restoreSession completed in ${timer.elapsedMilliseconds}ms');
+      debugPrint(
+          '[SESSION_GATE] restoreSession completed in ${timer.elapsedMilliseconds}ms');
 
       if (customer != null) {
         debugPrint('[SESSION_GATE] Session valid → dashboard');
-        if (mounted) setState(() { _checking = false; _sessionValid = true; });
+        if (mounted) {
+          setState(() {
+            _checking = false;
+            _sessionValid = true;
+          });
+        }
       } else {
         debugPrint('[SESSION_GATE] Session invalid → login screen');
-        if (mounted) setState(() { _checking = false; _sessionValid = false; });
+        if (mounted) {
+          setState(() {
+            _checking = false;
+            _sessionValid = false;
+          });
+        }
       }
     } catch (e) {
       debugPrint('[SESSION_GATE] Error during restore: $e');
-      if (mounted) setState(() { _checking = false; _sessionValid = false; });
+      if (mounted) {
+        setState(() {
+          _checking = false;
+          _sessionValid = false;
+        });
+      }
     }
   }
-
-
 
   @override
   Widget build(BuildContext context) {
@@ -371,7 +487,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _resetIdleTimer();
+    if (!kIsWeb) {
+      _resetIdleTimer();
+    }
 
     ConnectivityService.instance.start();
     _idleListener = _handleIdleState;
@@ -653,6 +771,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   void _resetIdleTimer() {
+    if (kIsWeb) return;
     _idleTimer?.cancel();
     if (!IdleTimer.enabled.value) {
       return;
@@ -661,6 +780,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   void _handleIdleTimeout() async {
+    if (kIsWeb) return;
     if (!IdleTimer.enabled.value) return;
     if (await _shouldSkipIdleRedirectBySetupState()) {
       _resetIdleTimer();
@@ -1030,9 +1150,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     if (!mounted) return;
     final activeContext = rootNavigatorKey.currentContext;
     if (activeContext == null) return;
-    // ignore: use_build_context_synchronously
     unawaited(
       showPosPaymentSuccessDialog(
+        // ignore: use_build_context_synchronously
         activeContext,
         autoClose: const Duration(seconds: 2),
         data: data,

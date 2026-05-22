@@ -202,6 +202,44 @@ class PrinterService {
   }
 
   // ================= RECEIPT PRINT =================
+  Future<void> printAfterSuccessfulQrScan({
+    required int orderId,
+    required List<Map<String, dynamic>> cartItems,
+    int? displayOrderNumber,
+    num? totalAmountOverride,
+    String? restaurantName,
+    String? address,
+    String? taxId,
+    String? paymentMode,
+    String? transactionId,
+    DateTime? orderDate,
+    num? taxAmount,
+    num? discountAmount,
+    String? orderType,
+    bool forceLocal = false,
+    bool removeTaxLines = false,
+    num? parcelTotalOverride,
+  }) {
+    return printOrder(
+      orderId: orderId,
+      cartItems: cartItems,
+      displayOrderNumber: displayOrderNumber,
+      totalAmountOverride: totalAmountOverride,
+      restaurantName: restaurantName,
+      address: address,
+      taxId: taxId,
+      paymentMode: paymentMode ?? "PAID",
+      transactionId: transactionId,
+      orderDate: orderDate,
+      taxAmount: taxAmount,
+      discountAmount: discountAmount,
+      orderType: orderType,
+      forceLocal: forceLocal,
+      removeTaxLines: removeTaxLines,
+      parcelTotalOverride: parcelTotalOverride,
+    );
+  }
+
   Future<void> printOrder({
     required int orderId,
     required List<Map<String, dynamic>> cartItems,
@@ -706,6 +744,7 @@ class PrinterService {
 
   Future<void> saveSelectedUsbPrinter(Map<String, dynamic> printer) async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.setString("printer_type", PrinterType.usb.name);
     await prefs.setString(_usbPrinterConfigKey, jsonEncode(printer));
     await _usbService.setSelectedPrinter(printer);
     await _usbService.scanAndConnect();

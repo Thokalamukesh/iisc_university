@@ -133,24 +133,13 @@ class AuthService {
     required SharedPreferences prefs,
     required String restaurantId,
   }) async {
-    final keys = <String>[];
-    void addKey(String? raw) {
-      final value = raw?.trim() ?? "";
-      if (value.isEmpty) return;
-      if (!keys.contains(value)) keys.add(value);
-    }
-
-    final storedId = prefs.getString("restaurant_id")?.trim() ?? "";
-    final storedHash = prefs.getString("restaurant_hash")?.trim() ?? "";
-    final normalized = restaurantId.trim();
-    addKey(storedId);
-    addKey(storedHash);
-    addKey(normalized);
+    final keys = _localRegistrationRestaurantKeys(
+      prefs: prefs,
+      restaurantId: restaurantId,
+    );
 
     final lookupCandidates = <String>[
-      if (storedHash.isNotEmpty) storedHash,
-      if (normalized.isNotEmpty) normalized,
-      if (storedId.isNotEmpty) storedId,
+      for (final key in keys) key,
     ];
     for (final candidate in lookupCandidates) {
       final matched = await _findRestaurantByAnyId(candidate);
@@ -161,22 +150,52 @@ class AuthService {
       if (id.isNotEmpty) await prefs.setString("restaurant_id", id);
       if (hash.isNotEmpty) await prefs.setString("restaurant_hash", hash);
       if (name.isNotEmpty) await prefs.setString("restaurant_name", name);
-      // Try id first for current backend path, then hash fallback.
-      addKey(id);
-      addKey(hash);
+      for (final key in [id, hash]) {
+        if (key.isNotEmpty && !keys.contains(key)) keys.add(key);
+      }
       break;
     }
 
-    // The kiosk register endpoint accepts restaurant slugs/hashes more reliably
-    // than numeric ids on the web backend, so try hash-like keys first and keep
-    // numeric ids as fallback.
+    _sortRegistrationKeys(keys);
+    return keys;
+  }
+
+  List<String> _localRegistrationRestaurantKeys({
+    required SharedPreferences prefs,
+    required String restaurantId,
+  }) {
+    final keys = <String>[];
+    void addKey(String? raw) {
+      final value = raw?.trim() ?? "";
+      if (value.isEmpty) return;
+      if (!keys.contains(value)) keys.add(value);
+    }
+
+    addKey(prefs.getString("restaurant_id"));
+    addKey(prefs.getString("restaurant_hash"));
+    addKey(restaurantId);
+    _sortRegistrationKeys(keys);
+    return keys;
+  }
+
+  void _sortRegistrationKeys(List<String> keys) {
     keys.sort((a, b) {
       final aIsNumeric = RegExp(r'^\d+$').hasMatch(a);
       final bIsNumeric = RegExp(r'^\d+$').hasMatch(b);
       if (aIsNumeric == bIsNumeric) return 0;
       return aIsNumeric ? 1 : -1;
     });
-    return keys;
+  }
+
+  String? _cachedScopedToken(
+    SharedPreferences prefs,
+    List<String> restaurantKeys,
+  ) {
+    for (final key in restaurantKeys) {
+      final scoped = prefs.getString(_scopedAuthTokenKey([key]))?.trim() ?? "";
+      if (scoped.isNotEmpty) return scoped;
+    }
+    return null;
   }
 
   Future<bool> initializeKiosk({bool force = false}) {
@@ -206,6 +225,29 @@ class AuthService {
         _setFailure("Restaurant ID missing");
         return false;
       }
+
+      if (!force) {
+        final localKeys = _localRegistrationRestaurantKeys(
+          prefs: prefs,
+          restaurantId: restaurantId,
+        );
+        final scopedToken = _cachedScopedToken(prefs, localKeys);
+        if (scopedToken != null) {
+          await prefs.setString("auth_token", scopedToken);
+          _log("✅ Using scoped cached kiosk token (fast path)");
+          return true;
+        }
+
+        final token = prefs.getString("auth_token")?.trim() ?? "";
+        if (token.isNotEmpty) {
+          if (localKeys.isNotEmpty) {
+            await prefs.setString(_scopedAuthTokenKey(localKeys), token);
+          }
+          _log("✅ Using existing kiosk token (fast path)");
+          return true;
+        }
+      }
+
       final registrationRestaurantKeys =
           await _resolveRegistrationRestaurantKeys(
         prefs: prefs,

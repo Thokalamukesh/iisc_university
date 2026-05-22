@@ -27,6 +27,8 @@ class SessionManager {
   static const String _keyFirebaseToken = 'customer_firebase_token';
   static const String _keyLastRestaurant = 'last_restaurant';
   static const String _keyLoginTimestamp = 'login_timestamp';
+  static const String _keyGuestSession = 'customer_guest_session';
+  static const String _keyGuestId = 'customer_guest_id';
 
   // ── Token ─────────────────────────────────────────────────────
 
@@ -39,6 +41,7 @@ class SessionManager {
   Future<void> setSanctumToken(String token) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keySanctumToken, token.trim());
+    await prefs.setBool(_keyGuestSession, false);
   }
 
   /// Whether the user has a stored Sanctum token (quick sync check).
@@ -76,6 +79,37 @@ class SessionManager {
   Future<String?> getCustomerMobile() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_keyCustomerMobile)?.trim();
+  }
+
+  // ── Guest Session ────────────────────────────────────────────
+
+  Future<bool> isGuestSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keyGuestSession) ?? false;
+  }
+
+  Future<String> getOrCreateGuestId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final existing = prefs.getString(_keyGuestId)?.trim();
+    if (existing != null && existing.isNotEmpty) return existing;
+
+    final id = 'guest_${DateTime.now().microsecondsSinceEpoch}';
+    await prefs.setString(_keyGuestId, id);
+    return id;
+  }
+
+  Future<void> continueAsGuest() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keySanctumToken);
+    await prefs.remove(_keyCustomerJson);
+    await prefs.remove(_keyCustomerMobile);
+    await prefs.remove(_keyMobileVerified);
+    await prefs.remove(_keyFirebaseUid);
+    await prefs.remove(_keyFirebaseToken);
+    await prefs.remove(_keyLoginTimestamp);
+    await getOrCreateGuestId();
+    await prefs.setBool(_keyGuestSession, true);
+    debugPrint('[SESSION] Guest session started.');
   }
 
   // ── Firebase (write-once during login) ────────────────────────
@@ -134,6 +168,7 @@ class SessionManager {
     await prefs.remove(_keyFirebaseUid);
     await prefs.remove(_keyFirebaseToken);
     await prefs.remove(_keyLoginTimestamp);
+    await prefs.remove(_keyGuestSession);
     debugPrint('[SESSION] Session cleared.');
   }
 

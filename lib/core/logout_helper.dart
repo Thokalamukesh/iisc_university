@@ -1,3 +1,4 @@
+import 'package:api_selfxo_project/screens/register_screen_io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';

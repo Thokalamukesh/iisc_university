@@ -259,7 +259,7 @@ class PaymentSuccessDialog extends StatefulWidget {
         !(usedSyntheticItems &&
             (resolvedSubTotalAmount == null || resolvedSubTotalAmount <= 0));
 
-    await PrinterService().printOrder(
+    await PrinterService().printAfterSuccessfulQrScan(
       orderId: orderNumber,
       cartItems: printItems,
       restaurantName: resolvedRestaurantName,

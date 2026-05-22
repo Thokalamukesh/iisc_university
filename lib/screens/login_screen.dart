@@ -1,15 +1,21 @@
+import 'package:api_selfxo_project/screens/block_screen.dart';
 import 'package:api_selfxo_project/screens/otp_screen.dart';
 import 'package:api_selfxo_project/services/firebase_auth_service.dart';
 import 'package:api_selfxo_project/services/pwa_auth_service.dart';
+import 'package:api_selfxo_project/services/session_manager.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
 class FoodOtpLoginScreen extends StatefulWidget {
   final WidgetBuilder? afterVerifiedBuilder;
+  final VoidCallback? onLoginComplete;
 
   const FoodOtpLoginScreen({
     super.key,
     this.afterVerifiedBuilder,
+    this.onLoginComplete,
   });
 
   @override
@@ -29,6 +35,7 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
   String? errorText;
   String? _statusText;
   bool _sendingOtp = false;
+  bool _continuingAsGuest = false;
 
   @override
   void dispose() {
@@ -39,7 +46,7 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
   }
 
   Future<void> _sendOtp() async {
-    if (_sendingOtp) return;
+    if (_sendingOtp || _continuingAsGuest) return;
 
     final mobile = phoneController.text.trim();
     debugPrint("[OTP] Get OTP tapped. mobile_length=${mobile.length}");
@@ -107,6 +114,7 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
             otpSession: session,
             customerName: nameController.text.trim(),
             afterVerifiedBuilder: widget.afterVerifiedBuilder,
+            onLoginComplete: widget.onLoginComplete,
           ),
         ),
       );
@@ -128,6 +136,38 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
     final message = error.toString().replaceFirst("Exception: ", "").trim();
     if (message.isEmpty) return "Unable to send OTP. Please try again.";
     return message;
+  }
+
+  Future<void> _continueAsGuest() async {
+    if (_sendingOtp || _continuingAsGuest) return;
+    setState(() {
+      _continuingAsGuest = true;
+      errorText = null;
+      _statusText = "Opening as guest...";
+    });
+
+    try {
+      await SessionManager.instance.continueAsGuest();
+      if (!mounted) return;
+      widget.onLoginComplete?.call();
+      if (kIsWeb) {
+        context.go('/home');
+        return;
+      }
+      final destination = widget.afterVerifiedBuilder?.call(context) ??
+          const CustomerBlockScreen();
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => destination),
+        (_) => false,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _continuingAsGuest = false;
+        errorText = _readableError(e);
+        _statusText = null;
+      });
+    }
   }
 
   @override
@@ -169,7 +209,7 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
       borderRadius: const BorderRadius.vertical(bottom: Radius.circular(34)),
       child: Container(
         width: double.infinity,
-        height: 270,
+        height: 220,
         decoration: const BoxDecoration(
           gradient: LinearGradient(
             colors: [Color(0xFF7A211E), primary, Color(0xFFD85B43)],
@@ -195,35 +235,28 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(22, 18, 22, 42),
-              child: Stack(
+              padding: const EdgeInsets.fromLTRB(22, 18, 22, 34),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Align(
-                    alignment: Alignment.topLeft,
-                    child: SizedBox(
-                      width: 92,
-                      height: 44,
-                      child: Image.asset(
-                        "assets/self.png",
-                        fit: BoxFit.contain,
-                        alignment: Alignment.centerLeft,
-                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                      ),
+                  SizedBox(
+                    width: 92,
+                    height: 44,
+                    child: Image.asset(
+                      "assets/self.png",
+                      fit: BoxFit.contain,
+                      alignment: Alignment.centerLeft,
+                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                     ),
                   ),
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Padding(
-                      padding: EdgeInsets.only(top: 72),
-                      child: Text(
-                        "Sign in",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 34,
-                          fontWeight: FontWeight.w900,
-                          height: 1,
-                        ),
-                      ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    "Sign in",
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 34,
+                      fontWeight: FontWeight.w900,
+                      height: 1,
                     ),
                   ),
                 ],
@@ -332,7 +365,7 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
             width: double.infinity,
             height: 58,
             child: ElevatedButton(
-              onPressed: _sendingOtp ? null : _sendOtp,
+              onPressed: (_sendingOtp || _continuingAsGuest) ? null : _sendOtp,
               style: ElevatedButton.styleFrom(
                 elevation: 0,
                 backgroundColor: primary,
@@ -356,6 +389,35 @@ class _FoodOtpLoginScreenState extends State<FoodOtpLoginScreen> {
                       "Get OTP",
                       style: TextStyle(
                         fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            height: 52,
+            child: OutlinedButton(
+              onPressed:
+                  (_sendingOtp || _continuingAsGuest) ? null : _continueAsGuest,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: primary,
+                side: const BorderSide(color: primary, width: 1.2),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+              ),
+              child: _continuingAsGuest
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2.2),
+                    )
+                  : const Text(
+                      "Continue as Guest",
+                      style: TextStyle(
+                        fontSize: 15,
                         fontWeight: FontWeight.w900,
                       ),
                     ),

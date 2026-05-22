@@ -4,6 +4,7 @@ import 'package:api_selfxo_project/core/device_layout.dart';
 import 'package:api_selfxo_project/screens/admin_dashboard_screens/adim_homescreen.dart';
 import 'package:api_selfxo_project/screens/main_navigation.dart';
 import 'package:api_selfxo_project/screens/order_pickup_confirmation_screen.dart';
+import 'package:api_selfxo_project/services/customer_order_history_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -491,6 +492,7 @@ class _PaymentScreenState extends State<PaymentScreen>
     });
 
     if (!_active || !mounted) return;
+    _saveCustomerOrderHistoryInBackground();
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
@@ -500,6 +502,24 @@ class _PaymentScreenState extends State<PaymentScreen>
           orderType: widget.orderType,
         ),
       ),
+    );
+  }
+
+  void _saveCustomerOrderHistoryInBackground() {
+    final orderId = _orderId;
+    if (orderId == null) return;
+
+    unawaited(
+      CustomerOrderHistoryService.instance
+          .savePaidOrder(
+            orderId: orderId,
+            restaurantName: _displayRestaurantName,
+            orderType: widget.orderType,
+            totalAmount: _payableAmount ?? widget.totalAmount.toDouble(),
+            cart: widget.cart,
+          )
+          .timeout(const Duration(seconds: 2))
+          .catchError((_) {}),
     );
   }
 

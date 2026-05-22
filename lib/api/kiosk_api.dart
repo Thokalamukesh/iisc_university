@@ -14,7 +14,7 @@ class KioskApi {
   static const String _webRestaurantsCacheKey = "web_restaurants_cache";
   static const String _productsCacheKey = "kiosk_products_cache";
   static const int _defaultWebRestaurantsBranchId = 4;
-  static const Duration _webRestaurantsMemoryTtl = Duration(minutes: 3);
+  static const Duration _webRestaurantsMemoryTtl = Duration(minutes: 30);
   static const Duration _webRestaurantsFailureBackoff = Duration(seconds: 5);
   static const Duration _productsCacheTtl = Duration(minutes: 8);
   static Future<List<Map<String, dynamic>>>? _webRestaurantsInFlight;
@@ -62,6 +62,19 @@ class KioskApi {
       return memory;
     }
 
+    if (!forceRefresh) {
+      final cached = await _readCachedRestaurants(branchId);
+      if (cached.isNotEmpty) {
+        _setWebRestaurantsMemoryCache(cached, branchId);
+        kioskLog(
+          'Using ${cached.length} cached restaurants; refreshing in background',
+          tag: 'WEB_RESTAURANTS',
+        );
+        unawaited(_refreshRestaurantsCache(branchId));
+        return cached;
+      }
+    }
+
     final lastFailureAt = _webRestaurantsLastFailureAt;
     if (!forceRefresh &&
         lastFailureAt != null &&
@@ -103,6 +116,23 @@ class KioskApi {
         _webRestaurantsInFlight = null;
         _webRestaurantsInFlightBranchId = null;
       }
+    }
+  }
+
+  Future<void> _refreshRestaurantsCache(int branchId) async {
+    try {
+      final list = await _loadAllRestaurantsWeb(
+        forceRefresh: true,
+        branchId: branchId,
+      );
+      if (list.isNotEmpty) {
+        _setWebRestaurantsMemoryCache(list, branchId);
+      }
+    } catch (e) {
+      kioskLog(
+        'background restaurant refresh skipped: $e',
+        tag: 'WEB_RESTAURANTS',
+      );
     }
   }
 
@@ -205,7 +235,10 @@ class KioskApi {
     }
 
     if (!forceRefresh) {
-      final diskCache = await _readCachedProducts(restaurantKey);
+      final diskCache = await _readCachedProducts(
+        restaurantKey,
+        allowExpired: true,
+      );
       if (diskCache != null) {
         _setProductsMemoryCache(diskCache, restaurantKey);
         kioskLog(
@@ -303,7 +336,10 @@ class KioskApi {
     } catch (_) {}
   }
 
-  Future<Response?> _readCachedProducts(String restaurantKey) async {
+  Future<Response?> _readCachedProducts(
+    String restaurantKey, {
+    bool allowExpired = false,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_productsScopedCacheKey(restaurantKey));
@@ -313,7 +349,8 @@ class KioskApi {
       final cachedAtMs =
           int.tryParse(decoded["cached_at"]?.toString() ?? "") ?? 0;
       final cachedAt = DateTime.fromMillisecondsSinceEpoch(cachedAtMs);
-      if (DateTime.now().difference(cachedAt) > _productsCacheTtl) {
+      if (!allowExpired &&
+          DateTime.now().difference(cachedAt) > _productsCacheTtl) {
         return null;
       }
       return Response(

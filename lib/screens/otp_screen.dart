@@ -3,14 +3,17 @@ import 'dart:async';
 import 'package:api_selfxo_project/screens/block_screen.dart';
 import 'package:api_selfxo_project/services/firebase_auth_service.dart';
 import 'package:api_selfxo_project/services/pwa_auth_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
 class FoodOtpVerifyScreen extends StatefulWidget {
   final String mobileNumber;
   final FirebaseOtpSession otpSession;
   final String customerName; // optional — may be empty
   final WidgetBuilder? afterVerifiedBuilder;
+  final VoidCallback? onLoginComplete;
 
   const FoodOtpVerifyScreen({
     super.key,
@@ -18,6 +21,7 @@ class FoodOtpVerifyScreen extends StatefulWidget {
     required this.otpSession,
     this.customerName = '',
     this.afterVerifiedBuilder,
+    this.onLoginComplete,
   });
 
   @override
@@ -174,6 +178,11 @@ class _FoodOtpVerifyScreenState extends State<FoodOtpVerifyScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text("Login successful")),
     );
+    widget.onLoginComplete?.call();
+    if (kIsWeb) {
+      context.go('/home');
+      return;
+    }
     final destination = widget.afterVerifiedBuilder?.call(context) ??
         const CustomerBlockScreen();
     Navigator.of(context).pushAndRemoveUntil(

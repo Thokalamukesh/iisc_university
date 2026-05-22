@@ -1,5 +1,6 @@
 import 'package:api_selfxo_project/providers/restaurant_provider.dart';
 import 'package:api_selfxo_project/screens/register_screen.dart';
+import 'package:api_selfxo_project/screens/register_screen_io.dart';
 import 'package:api_selfxo_project/screens/web_qr_menu_entry.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
